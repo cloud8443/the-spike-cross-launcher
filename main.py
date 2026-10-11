@@ -1,6 +1,7 @@
 import sys
 import os
 import pkgutil
+import PyQt6.sip
 import traceback
 import json
 import socket

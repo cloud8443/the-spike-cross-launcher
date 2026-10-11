@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.exe
+*.spec
+*.zip
+프로토/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Secrets & SSH Keys
+*.key
+*.pem
+*.id_rsa
+.env

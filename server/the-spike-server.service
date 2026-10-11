@@ -1,0 +1,16 @@
+[Unit]
+Description=The Spike Cross Multiplayer Matchmaking Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/the-spike-server
+ExecStart=/usr/bin/python3 /home/ubuntu/the-spike-server/server.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

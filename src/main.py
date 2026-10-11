@@ -1,5 +1,6 @@
 import sys
 import os
+import pkgutil
 import traceback
 import json
 import socket

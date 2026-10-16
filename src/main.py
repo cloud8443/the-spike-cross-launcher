@@ -8,6 +8,27 @@ import socket
 import threading
 import webbrowser
 
+# src 패키지 경로를 sys.path에 추가 (모듈 임포트용)
+_src_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_src_dir)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
+
+try:
+    from src.streaming.host_runner import HostRunner
+    from src.streaming.guest_runner import GuestRunner
+    from src.streaming.virtual_controller import KeymapManager
+    from src.ui.keymap_dialog import KeymapDialog
+    from src.network.signaling import SignalingHandler
+except ImportError:
+    from streaming.host_runner import HostRunner
+    from streaming.guest_runner import GuestRunner
+    from streaming.virtual_controller import KeymapManager
+    from ui.keymap_dialog import KeymapDialog
+    from network.signaling import SignalingHandler
+
 # -------------------------------------------------------------
 # Windows 환경 Qt6 DLL 및 플랫폼 플러그인(qwindows.dll) 경로 자동 바인딩
 # -------------------------------------------------------------
@@ -284,6 +305,10 @@ class NetworkSignalEmitter(QObject):
     room_closed = pyqtSignal(str)
     chat_received = pyqtSignal(str, str)
     error_received = pyqtSignal(str)
+    # 스트리밍 멀티 시그널
+    room_ready_for_host = pyqtSignal(dict)
+    session_started = pyqtSignal(dict)
+    signal_exchanged = pyqtSignal(dict)
 
 class SpikeLauncher(QMainWindow):
     def __init__(self):
@@ -301,6 +326,13 @@ class SpikeLauncher(QMainWindow):
         self.my_name = "플레이어"
         self.current_room_id = None
         self.my_role = None
+
+        # 스트리밍 멀티플레이 상태
+        self.streaming_role = None  # 'streaming_host' or 'streaming_guest'
+        self.host_runner = None
+        self.guest_runner = None
+        self.keymap_manager = KeymapManager()
+        self.signaling = SignalingHandler(self.send_json)
 
         self.signals = NetworkSignalEmitter()
         self.bind_signals()
@@ -477,17 +509,57 @@ class SpikeLauncher(QMainWindow):
         chat_input_layout.addWidget(self.chat_input)
         chat_input_layout.addWidget(self.btn_send_chat)
 
+        self.btn_claim_host = QPushButton("🚀 내가 호스트로 시작하기")
+        self.btn_claim_host.setObjectName("BtnClaimHost")
+        self.btn_claim_host.setStyleSheet("""
+            QPushButton#BtnClaimHost {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #f59e0b, stop:1 #ef4444);
+                color: #ffffff;
+                font-size: 15px;
+                font-weight: 800;
+                border-radius: 12px;
+                min-height: 48px;
+                border: 1px solid rgba(255, 255, 255, 0.25);
+            }
+            QPushButton#BtnClaimHost:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #fbbf24, stop:1 #f87171);
+            }
+            QPushButton#BtnClaimHost:disabled {
+                background-color: #374151;
+                color: #9ca3af;
+                border: 1px solid #4b5563;
+            }
+        """)
+        self.btn_claim_host.clicked.connect(self.claim_host)
+        self.btn_claim_host.setVisible(False)
+
+        self.lbl_streaming_status = QLabel("")
+        self.lbl_streaming_status.setStyleSheet("font-size: 13px; color: #38bdf8; font-weight: bold;")
+        self.lbl_streaming_status.setVisible(False)
+
         self.btn_room_leave = QPushButton("방 나가기")
         self.btn_room_leave.setProperty("class", "DangerButton")
         self.btn_room_leave.setFixedHeight(42)
         self.btn_room_leave.clicked.connect(self.leave_room)
 
+        self.btn_open_keymap = QPushButton("🎮 2P 키 매핑 설정")
+        self.btn_open_keymap.setProperty("class", "PrimaryButton")
+        self.btn_open_keymap.setFixedHeight(42)
+        self.btn_open_keymap.clicked.connect(self.open_keymap_dialog)
+
+        bottom_btn_layout = QHBoxLayout()
+        bottom_btn_layout.setSpacing(10)
+        bottom_btn_layout.addWidget(self.btn_open_keymap)
+        bottom_btn_layout.addWidget(self.btn_room_leave)
+
         room_waiting_layout.addWidget(self.lbl_current_room_title)
         room_waiting_layout.addWidget(self.lbl_connection_status)
+        room_waiting_layout.addWidget(self.btn_claim_host)
+        room_waiting_layout.addWidget(self.lbl_streaming_status)
         room_waiting_layout.addWidget(QLabel("💬 실시간 대화창"))
         room_waiting_layout.addWidget(self.chat_display)
         room_waiting_layout.addLayout(chat_input_layout)
-        room_waiting_layout.addWidget(self.btn_room_leave)
+        room_waiting_layout.addLayout(bottom_btn_layout)
 
         self.multi_stacked.addWidget(friendly_widget)
         self.multi_stacked.addWidget(room_waiting_widget)
@@ -525,6 +597,12 @@ class SpikeLauncher(QMainWindow):
         self.btn_reconnect.setFixedHeight(40)
         self.btn_reconnect.clicked.connect(self.reconnect_with_new_settings)
         fb_layout.addWidget(self.btn_reconnect)
+
+        self.btn_settings_keymap = QPushButton("🎮 2P 키 매핑 설정")
+        self.btn_settings_keymap.setProperty("class", "SuccessButton")
+        self.btn_settings_keymap.setFixedHeight(40)
+        self.btn_settings_keymap.clicked.connect(self.open_keymap_dialog)
+        fb_layout.addWidget(self.btn_settings_keymap)
 
         settings_layout.addWidget(form_box)
         settings_layout.addStretch()
@@ -566,6 +644,10 @@ class SpikeLauncher(QMainWindow):
         self.signals.room_closed.connect(self.on_room_closed)
         self.signals.chat_received.connect(self.on_chat_received)
         self.signals.error_received.connect(lambda msg: QMessageBox.warning(self, "안내", msg))
+        # 스트리밍 멀티플레이 시그널
+        self.signals.room_ready_for_host.connect(self.on_room_ready_for_host)
+        self.signals.session_started.connect(self.on_session_started)
+        self.signals.signal_exchanged.connect(self.on_signal_exchanged)
 
     # =========================================================
     # 네트워크 통신 루프
@@ -641,6 +723,15 @@ class SpikeLauncher(QMainWindow):
         elif mtype == 'chat_message':
             self.signals.chat_received.emit(msg.get('sender', '상대방'), msg.get('message', ''))
 
+        elif mtype == 'room_ready_for_host':
+            self.signals.room_ready_for_host.emit(msg)
+
+        elif mtype == 'session_started':
+            self.signals.session_started.emit(msg)
+
+        elif mtype == 'signal_exchange':
+            self.signals.signal_exchanged.emit(msg)
+
         elif mtype == 'error':
             self.signals.error_received.emit(msg.get('message', '오류가 발생했습니다.'))
 
@@ -691,6 +782,7 @@ class SpikeLauncher(QMainWindow):
         self.send_json({'action': 'create_room', 'room_name': room_name})
 
     def on_room_created(self, data):
+        self.cleanup_streaming()
         self.current_room_id = data['room_id']
         self.my_role = 'host'
         room_name = data['room_name']
@@ -719,6 +811,7 @@ class SpikeLauncher(QMainWindow):
         self.send_json({'action': 'join_room', 'room_id': room_id})
 
     def on_room_joined(self, data):
+        self.cleanup_streaming()
         self.current_room_id = data['room_id']
         self.my_role = 'guest'
         room_name = data['room_name']
@@ -736,11 +829,35 @@ class SpikeLauncher(QMainWindow):
         self.lbl_connection_status.setStyleSheet("color: #10b981; font-size: 13px; font-weight: bold;")
         self.chat_display.addItem(f"[시스템] {peer_name}님이 입장하셨습니다.")
 
+    def cleanup_streaming(self):
+        if self.host_runner:
+            try:
+                self.host_runner.stop_session()
+            except Exception:
+                pass
+            self.host_runner = None
+
+        if self.guest_runner:
+            try:
+                self.guest_runner.stop_session()
+            except Exception:
+                pass
+            self.guest_runner = None
+
+        self.streaming_role = None
+        self.btn_claim_host.setVisible(False)
+        self.btn_claim_host.setEnabled(True)
+        self.btn_claim_host.setText("🚀 내가 호스트로 시작하기")
+        self.lbl_streaming_status.setVisible(False)
+        self.lbl_streaming_status.setText("")
+
     def on_peer_left(self, reason):
+        self.cleanup_streaming()
         self.lbl_connection_status.setText("상태: 상대방의 입장을 기다리는 중...")
         self.chat_display.addItem(f"[시스템] {reason}")
 
     def on_room_closed(self, reason):
+        self.cleanup_streaming()
         QMessageBox.information(self, "퇴장 안내", reason)
         self.current_room_id = None
         self.my_role = None
@@ -762,11 +879,124 @@ class SpikeLauncher(QMainWindow):
         self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
     def leave_room(self):
+        self.cleanup_streaming()
         self.send_json({'action': 'leave_room'})
         self.current_room_id = None
         self.my_role = None
         self.multi_stacked.setCurrentIndex(0)
         self.request_room_list()
+
+    # =========================================================
+    # 스트리밍 멀티플레이 핸들러
+    # =========================================================
+    def open_keymap_dialog(self):
+        dlg = KeymapDialog(self.keymap_manager, self)
+        dlg.exec()
+
+    def on_room_ready_for_host(self, data):
+        self.btn_claim_host.setVisible(True)
+        self.btn_claim_host.setEnabled(True)
+        self.btn_claim_host.setText("🚀 내가 호스트로 시작하기")
+        self.chat_display.addItem("[안내] 2명이 모두 모였습니다! [내가 호스트로 시작하기] 버튼을 누르면 멀티플레이가 시작됩니다.")
+        self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
+
+    def claim_host(self):
+        if not self.current_room_id:
+            return
+        self.btn_claim_host.setEnabled(False)
+        self.btn_claim_host.setText("⏳ 호스트 환경 준비 요청 중...")
+        self.send_json({'action': 'claim_host', 'room_id': self.current_room_id})
+
+    def on_session_started(self, data):
+        role = data.get('role')
+        host_name = data.get('host', '호스트')
+        guest_name = data.get('guest', '게스트')
+        self.btn_claim_host.setVisible(False)
+        self.lbl_streaming_status.setVisible(True)
+
+        if role == 'streaming_host':
+            self.streaming_role = 'streaming_host'
+            self.lbl_streaming_status.setText(f"👑 내가 호스트입니다 (게스트: {guest_name})")
+            self.lbl_streaming_status.setStyleSheet("color: #f59e0b; font-size: 13px; font-weight: bold;")
+            self.chat_display.addItem("[시스템] 내가 호스트로 선정되었습니다! 게임 및 스트리밍 환경을 시작합니다.")
+            self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
+
+            def host_status_cb(text):
+                self.chat_display.addItem(f"[호스트] {text}")
+                self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
+
+            self.host_runner = HostRunner(status_callback=host_status_cb)
+            ok, msg = self.host_runner.start_session()
+            if ok:
+                conn_info = self.host_runner.get_connection_info()
+                self.signaling.send_host_info(self.current_room_id, conn_info['host_ip'], conn_info['input_port'])
+                self.chat_display.addItem("[안내] 상대방에게 연결 정보(IP, 포트)를 전송했습니다.")
+            else:
+                self.chat_display.addItem(f"[오류] 호스트 시작 실패: {msg}")
+            self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
+
+        elif role == 'streaming_guest':
+            self.streaming_role = 'streaming_guest'
+            self.lbl_streaming_status.setText(f"🎮 내가 게스트(2P)입니다 (호스트: {host_name})")
+            self.lbl_streaming_status.setStyleSheet("color: #38bdf8; font-size: 13px; font-weight: bold;")
+            self.chat_display.addItem(f"[시스템] {host_name}님이 호스트로 시작했습니다. 호스트 연결 정보를 대기 중입니다...")
+            self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
+
+    def on_signal_exchanged(self, data):
+        payload = data.get('payload', {})
+        ptype = payload.get('type')
+        if ptype == 'host_info' and self.streaming_role == 'streaming_guest':
+            host_ip = payload.get('host_ip', '127.0.0.1')
+            input_port = payload.get('input_port', 47990)
+            self.chat_display.addItem(f"[시스템] 호스트 연결 정보 수신 완료 ({host_ip}:{input_port})")
+
+            def guest_status_cb(text):
+                self.chat_display.addItem(f"[게스트] {text}")
+                self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
+
+            self.guest_runner = GuestRunner(host_ip, input_port, status_callback=guest_status_cb)
+            ok, msg = self.guest_runner.start_session()
+            if ok:
+                self.chat_display.addItem("[안내] 2P 키보드 입력이 호스트로 실시간 전송됩니다! (하단 키 매핑 버튼으로 언제든 변경 가능)")
+            self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
+
+    def _qt_key_to_string(self, key):
+        special_keys = {
+            Qt.Key.Key_Escape: "Escape",
+            Qt.Key.Key_Space: "Space",
+            Qt.Key.Key_Tab: "Tab",
+            Qt.Key.Key_Return: "Enter",
+            Qt.Key.Key_Enter: "Enter",
+            Qt.Key.Key_Up: "Up",
+            Qt.Key.Key_Down: "Down",
+            Qt.Key.Key_Left: "Left",
+            Qt.Key.Key_Right: "Right",
+            Qt.Key.Key_Shift: "Shift",
+            Qt.Key.Key_Control: "Ctrl",
+        }
+        if key in special_keys:
+            return special_keys[key]
+        if 0x20 <= key <= 0x7E:
+            return chr(key).upper()
+        return None
+
+    def keyPressEvent(self, event):
+        if self.streaming_role == 'streaming_guest' and self.guest_runner:
+            if not self.chat_input.hasFocus():
+                k_str = self._qt_key_to_string(event.key())
+                if k_str:
+                    self.guest_runner.send_key_input(k_str, True)
+                    return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if self.streaming_role == 'streaming_guest' and self.guest_runner:
+            if not self.chat_input.hasFocus():
+                k_str = self._qt_key_to_string(event.key())
+                if k_str:
+                    self.guest_runner.send_key_input(k_str, False)
+                    return
+        super().keyReleaseEvent(event)
 
     def launch_game(self):
         try:
@@ -791,6 +1021,7 @@ class SpikeLauncher(QMainWindow):
 
     def closeEvent(self, event):
         self.is_running = False
+        self.cleanup_streaming()
         try:
             if self.current_room_id:
                 self.send_json({'action': 'leave_room'})

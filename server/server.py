@@ -12,7 +12,7 @@ logger = logging.getLogger("SpikeServer")
 
 # 전역 상태 관리
 connected_clients = {}  # client_id -> {'writer': StreamWriter, 'name': str, 'room_id': str or None}
-rooms = {}  # room_id -> {'id': str, 'name': str, 'host_id': str, 'guest_id': str or None, 'status': str}
+rooms = {}  # room_id -> {'id': str, 'name': str, 'host_id': str, 'guest_id': str or None, 'status': str, 'streaming_host': str or None}
 
 def get_room_list_payload():
     room_list = []
@@ -113,7 +113,8 @@ async def handle_client(reader, writer):
                     'name': room_name,
                     'host_id': client_id,
                     'guest_id': None,
-                    'status': 'waiting'
+                    'status': 'waiting',
+                    'streaming_host': None
                 }
                 connected_clients[client_id]['room_id'] = new_room_id
 
@@ -172,7 +173,94 @@ async def handle_client(reader, writer):
                 # 로비 유저들에게 방 목록 갱신 알림
                 await broadcast_lobby(get_room_list_payload())
 
-            # 5. 대기실 채팅
+                # 2인 충원 완료 시 양쪽 클라이언트에 호스트 시작 버튼 활성화 알림
+                if target_room['guest_id'] is not None:
+                    room_users = [target_room['host_id'], target_room['guest_id']]
+                    for uid in room_users:
+                        if uid in connected_clients:
+                            await send_json(connected_clients[uid]['writer'], {
+                                'type': 'room_ready_for_host',
+                                'room_id': target_room_id,
+                                'users': [connected_clients[u]['name'] for u in room_users if u in connected_clients]
+                            })
+
+            # 7. 스트리밍 호스트 권한 요청 (첫 번째로 누른 유저가 호스트)
+            elif action == 'claim_host':
+                room_id = msg.get('room_id') or connected_clients[client_id].get('room_id')
+                if not room_id or room_id not in rooms:
+                    await send_json(writer, {'type': 'error', 'message': '방을 찾을 수 없습니다.'})
+                    continue
+
+                room = rooms[room_id]
+                # 이미 호스트가 결정된 경우
+                if room.get('streaming_host') is not None:
+                    await send_json(writer, {'type': 'error', 'message': '이미 호스트가 결정되었습니다.'})
+                    continue
+
+                # 2명이 있어야 호스트 가능
+                if room['guest_id'] is None:
+                    await send_json(writer, {'type': 'error', 'message': '아직 상대방이 입장하지 않았습니다.'})
+                    continue
+
+                # 호스트 확정
+                room['streaming_host'] = client_id
+                room['status'] = 'streaming'
+                streaming_host_name = connected_clients[client_id]['name']
+
+                # 상대방(게스트) 결정
+                if room['host_id'] == client_id:
+                    streaming_guest_id = room['guest_id']
+                else:
+                    streaming_guest_id = room['host_id']
+                streaming_guest_name = connected_clients.get(streaming_guest_id, {}).get('name', '상대방')
+
+                logger.info(f"[스트리밍 시작] 방 '{room['name']}' - 호스트: {streaming_host_name}, 게스트: {streaming_guest_name}")
+
+                # 양쪽 클라이언트에 역할 확정 알림
+                await send_json(connected_clients[client_id]['writer'], {
+                    'type': 'session_started',
+                    'room_id': room_id,
+                    'role': 'streaming_host',
+                    'host': streaming_host_name,
+                    'guest': streaming_guest_name,
+                    'relay_server': '146.56.101.107:7777'
+                })
+
+                if streaming_guest_id in connected_clients:
+                    await send_json(connected_clients[streaming_guest_id]['writer'], {
+                        'type': 'session_started',
+                        'room_id': room_id,
+                        'role': 'streaming_guest',
+                        'host': streaming_host_name,
+                        'guest': streaming_guest_name,
+                        'relay_server': '146.56.101.107:7777'
+                    })
+
+                await broadcast_lobby(get_room_list_payload())
+
+            # 8. P2P 시그널링 정보 교환 중계
+            elif action == 'signal_exchange':
+                room_id = msg.get('room_id') or connected_clients[client_id].get('room_id')
+                if not room_id or room_id not in rooms:
+                    continue
+
+                room = rooms[room_id]
+                payload = msg.get('payload', {})
+
+                # 방 내 상대방에게 시그널 전달
+                if room['host_id'] == client_id:
+                    target_id = room['guest_id']
+                else:
+                    target_id = room['host_id']
+
+                if target_id and target_id in connected_clients:
+                    await send_json(connected_clients[target_id]['writer'], {
+                        'type': 'signal_exchange',
+                        'from': client_name,
+                        'payload': payload
+                    })
+
+            # 9. 방 나가기
             elif action == 'chat':
                 room_id = connected_clients[client_id]['room_id']
                 if not room_id or room_id not in rooms:
@@ -240,6 +328,7 @@ async def leave_current_room(client_id):
         logger.info(f"[참가자 퇴장] '{room['name']}'에서 {client_name} 퇴장")
         room['guest_id'] = None
         room['status'] = 'waiting'
+        room['streaming_host'] = None  # 스트리밍 세션 초기화
         host_id = room['host_id']
         if host_id and host_id in connected_clients:
             await send_json(connected_clients[host_id]['writer'], {

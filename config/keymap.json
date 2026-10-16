@@ -1,0 +1,11 @@
+{
+  "UP": "W",
+  "DOWN": "S",
+  "LEFT": "A",
+  "RIGHT": "D",
+  "RECEIVE_SLIDE": "K",
+  "JUMP_SPIKE": "L",
+  "BLOCK": "I",
+  "SPECIAL_TOSS": "J",
+  "PAUSE": "Escape"
+}

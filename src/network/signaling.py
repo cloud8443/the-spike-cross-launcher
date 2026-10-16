@@ -31,8 +31,8 @@ class SignalingHandler:
             "room_id": room_id
         })
 
-    def send_host_info(self, room_id, host_ip, input_port):
-        """호스트 연결 정보를 서버를 통해 게스트에게 전달."""
+    def send_host_info(self, room_id, host_ip, input_port, stream_port=47998):
+        """호스트 연결 정보(화면 공유 포트 포함)를 서버를 통해 게스트에게 전달."""
         self.send_json({
             "action": "signal_exchange",
             "room_id": room_id,
@@ -40,6 +40,7 @@ class SignalingHandler:
                 "type": "host_info",
                 "host_ip": host_ip,
                 "input_port": input_port,
+                "stream_port": stream_port,
             }
         })
 

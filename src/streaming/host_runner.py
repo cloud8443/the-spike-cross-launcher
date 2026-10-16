@@ -17,11 +17,13 @@ import threading
 import webbrowser
 
 from src.streaming.virtual_controller import VirtualGamepadManager, KeymapManager
+from src.streaming.screen_streamer import ScreenStreamer
 
 logger = logging.getLogger("HostRunner")
 
 STEAM_APP_ID = "3983810"
 INPUT_UDP_PORT = 47990  # 게스트로부터 입력을 받을 UDP 포트
+STREAM_PORT = 47998     # 게스트에게 비디오 화면을 송출할 TCP 포트
 
 
 def resource_path(relative_path):
@@ -47,6 +49,8 @@ class HostRunner:
         self._sunshine_proc = None
         self.local_ip = self._get_local_ip()
         self.input_port = INPUT_UDP_PORT
+        self.stream_port = STREAM_PORT
+        self.screen_streamer = ScreenStreamer(port=self.stream_port, status_callback=self.status_callback)
 
     def _get_local_ip(self):
         """로컬 IP 주소를 가져옴 (P2P 시그널링 전달용)."""
@@ -80,10 +84,18 @@ class HostRunner:
             self.status_callback(f"❌ 입력 수신 서버 오류: {e}")
             return False, str(e)
 
-        # 3. Sunshine 스트리밍 데몬 시도 (설치되어 있을 경우)
+        # 3. 실시간 화면 공유(비디오 스트리밍) 서버 시작
+        self.status_callback("📺 실시간 화면 공유 서버를 시작하는 중...")
+        stream_ok = self.screen_streamer.start_streaming()
+        if stream_ok:
+            self.status_callback(f"✅ 화면 공유 서버 준비 완료 (포트 {self.stream_port})")
+        else:
+            self.status_callback("⚠️ 화면 공유 서버 시작 실패")
+
+        # 4. Sunshine 스트리밍 데몬 시도 (설치되어 있을 경우)
         self._try_start_sunshine()
 
-        # 4. 스팀 게임 실행
+        # 5. 스팀 게임 실행
         self.status_callback("🎮 더 스파이크 크로스를 실행하는 중...")
         try:
             webbrowser.open(f"steam://rungameid/{STEAM_APP_ID}")
@@ -159,12 +171,19 @@ class HostRunner:
         return {
             "host_ip": self.local_ip,
             "input_port": self.input_port,
+            "stream_port": self.stream_port,
             "sunshine_available": self._sunshine_proc is not None,
         }
 
     def stop_session(self):
         """호스트 세션을 종료하고 모든 리소스를 정리."""
         self._running = False
+
+        # 화면 공유 서버 종료
+        try:
+            self.screen_streamer.stop_streaming()
+        except Exception:
+            pass
 
         # UDP 소켓 종료
         if self._udp_sock:

@@ -22,12 +22,14 @@ try:
     from src.streaming.virtual_controller import KeymapManager
     from src.ui.keymap_dialog import KeymapDialog
     from src.network.signaling import SignalingHandler
+    from src.streaming.screen_viewer import GameStreamViewerWindow
 except ImportError:
     from streaming.host_runner import HostRunner
     from streaming.guest_runner import GuestRunner
     from streaming.virtual_controller import KeymapManager
     from ui.keymap_dialog import KeymapDialog
     from network.signaling import SignalingHandler
+    from streaming.screen_viewer import GameStreamViewerWindow
 
 # -------------------------------------------------------------
 # Windows 환경 Qt6 DLL 및 플랫폼 플러그인(qwindows.dll) 경로 자동 바인딩
@@ -331,6 +333,7 @@ class SpikeLauncher(QMainWindow):
         self.streaming_role = None  # 'streaming_host' or 'streaming_guest'
         self.host_runner = None
         self.guest_runner = None
+        self.viewer_window = None
         self.keymap_manager = KeymapManager()
         self.signaling = SignalingHandler(self.send_json)
 
@@ -542,16 +545,6 @@ class SpikeLauncher(QMainWindow):
         self.btn_room_leave.setFixedHeight(42)
         self.btn_room_leave.clicked.connect(self.leave_room)
 
-        self.btn_open_keymap = QPushButton("🎮 2P 키 매핑 설정")
-        self.btn_open_keymap.setProperty("class", "PrimaryButton")
-        self.btn_open_keymap.setFixedHeight(42)
-        self.btn_open_keymap.clicked.connect(self.open_keymap_dialog)
-
-        bottom_btn_layout = QHBoxLayout()
-        bottom_btn_layout.setSpacing(10)
-        bottom_btn_layout.addWidget(self.btn_open_keymap)
-        bottom_btn_layout.addWidget(self.btn_room_leave)
-
         room_waiting_layout.addWidget(self.lbl_current_room_title)
         room_waiting_layout.addWidget(self.lbl_connection_status)
         room_waiting_layout.addWidget(self.btn_claim_host)
@@ -559,7 +552,7 @@ class SpikeLauncher(QMainWindow):
         room_waiting_layout.addWidget(QLabel("💬 실시간 대화창"))
         room_waiting_layout.addWidget(self.chat_display)
         room_waiting_layout.addLayout(chat_input_layout)
-        room_waiting_layout.addLayout(bottom_btn_layout)
+        room_waiting_layout.addWidget(self.btn_room_leave)
 
         self.multi_stacked.addWidget(friendly_widget)
         self.multi_stacked.addWidget(room_waiting_widget)
@@ -597,12 +590,6 @@ class SpikeLauncher(QMainWindow):
         self.btn_reconnect.setFixedHeight(40)
         self.btn_reconnect.clicked.connect(self.reconnect_with_new_settings)
         fb_layout.addWidget(self.btn_reconnect)
-
-        self.btn_settings_keymap = QPushButton("🎮 2P 키 매핑 설정")
-        self.btn_settings_keymap.setProperty("class", "SuccessButton")
-        self.btn_settings_keymap.setFixedHeight(40)
-        self.btn_settings_keymap.clicked.connect(self.open_keymap_dialog)
-        fb_layout.addWidget(self.btn_settings_keymap)
 
         settings_layout.addWidget(form_box)
         settings_layout.addStretch()
@@ -830,6 +817,13 @@ class SpikeLauncher(QMainWindow):
         self.chat_display.addItem(f"[시스템] {peer_name}님이 입장하셨습니다.")
 
     def cleanup_streaming(self):
+        if self.viewer_window:
+            try:
+                self.viewer_window.close()
+            except Exception:
+                pass
+            self.viewer_window = None
+
         if self.host_runner:
             try:
                 self.host_runner.stop_session()
@@ -889,10 +883,6 @@ class SpikeLauncher(QMainWindow):
     # =========================================================
     # 스트리밍 멀티플레이 핸들러
     # =========================================================
-    def open_keymap_dialog(self):
-        dlg = KeymapDialog(self.keymap_manager, self)
-        dlg.exec()
-
     def on_room_ready_for_host(self, data):
         self.btn_claim_host.setVisible(True)
         self.btn_claim_host.setEnabled(True)
@@ -918,7 +908,7 @@ class SpikeLauncher(QMainWindow):
             self.streaming_role = 'streaming_host'
             self.lbl_streaming_status.setText(f"👑 내가 호스트입니다 (게스트: {guest_name})")
             self.lbl_streaming_status.setStyleSheet("color: #f59e0b; font-size: 13px; font-weight: bold;")
-            self.chat_display.addItem("[시스템] 내가 호스트로 선정되었습니다! 게임 및 스트리밍 환경을 시작합니다.")
+            self.chat_display.addItem("[시스템] 내가 호스트로 선정되었습니다! 게임 및 화면 공유를 시작합니다.")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
             def host_status_cb(text):
@@ -929,8 +919,13 @@ class SpikeLauncher(QMainWindow):
             ok, msg = self.host_runner.start_session()
             if ok:
                 conn_info = self.host_runner.get_connection_info()
-                self.signaling.send_host_info(self.current_room_id, conn_info['host_ip'], conn_info['input_port'])
-                self.chat_display.addItem("[안내] 상대방에게 연결 정보(IP, 포트)를 전송했습니다.")
+                self.signaling.send_host_info(
+                    self.current_room_id,
+                    conn_info['host_ip'],
+                    conn_info['input_port'],
+                    conn_info.get('stream_port', 47998)
+                )
+                self.chat_display.addItem(f"[안내] 게스트에게 화면 공유 및 연결 정보를 전송했습니다.")
             else:
                 self.chat_display.addItem(f"[오류] 호스트 시작 실패: {msg}")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
@@ -939,7 +934,7 @@ class SpikeLauncher(QMainWindow):
             self.streaming_role = 'streaming_guest'
             self.lbl_streaming_status.setText(f"🎮 내가 게스트(2P)입니다 (호스트: {host_name})")
             self.lbl_streaming_status.setStyleSheet("color: #38bdf8; font-size: 13px; font-weight: bold;")
-            self.chat_display.addItem(f"[시스템] {host_name}님이 호스트로 시작했습니다. 호스트 연결 정보를 대기 중입니다...")
+            self.chat_display.addItem(f"[시스템] {host_name}님이 호스트로 시작했습니다. 화면 스트림 연결을 준비 중입니다...")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
     def on_signal_exchanged(self, data):
@@ -948,7 +943,8 @@ class SpikeLauncher(QMainWindow):
         if ptype == 'host_info' and self.streaming_role == 'streaming_guest':
             host_ip = payload.get('host_ip', '127.0.0.1')
             input_port = payload.get('input_port', 47990)
-            self.chat_display.addItem(f"[시스템] 호스트 연결 정보 수신 완료 ({host_ip}:{input_port})")
+            stream_port = payload.get('stream_port', 47998)
+            self.chat_display.addItem(f"[시스템] 호스트 연결 정보 수신 완료 (화면 공유 포트: {stream_port})")
 
             def guest_status_cb(text):
                 self.chat_display.addItem(f"[게스트] {text}")
@@ -957,7 +953,17 @@ class SpikeLauncher(QMainWindow):
             self.guest_runner = GuestRunner(host_ip, input_port, status_callback=guest_status_cb)
             ok, msg = self.guest_runner.start_session()
             if ok:
-                self.chat_display.addItem("[안내] 2P 키보드 입력이 호스트로 실시간 전송됩니다! (하단 키 매핑 버튼으로 언제든 변경 가능)")
+                self.chat_display.addItem("[안내] 2P 키보드 입력이 호스트로 실시간 전송됩니다!")
+
+            # 실시간 게임 화면 공유 뷰어 창 팝업!
+            if self.viewer_window:
+                try:
+                    self.viewer_window.close()
+                except Exception:
+                    pass
+            self.viewer_window = GameStreamViewerWindow(host_ip, stream_port, guest_runner=self.guest_runner)
+            self.viewer_window.show()
+            self.chat_display.addItem("[안내] 📺 실시간 게임 화면 창이 열렸습니다! 창에서 바로 2P 플레이가 가능합니다.")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
     def _qt_key_to_string(self, key):

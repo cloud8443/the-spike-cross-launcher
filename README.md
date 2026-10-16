@@ -7,16 +7,20 @@
 ## 📁 프로젝트 디렉토리 구조
 
 ```plaintext
-├── frontend/                     # 차세대 모션 웹 런처 (GSAP, Lenis, React Bits, Magic UI, shadcn)
-│   ├── src/components/react-bits # ShinyText, DecryptedText, Particles, SpotlightCard
-│   ├── src/components/magic-ui   # BentoGrid, BorderBeam, Marquee, ShimmerButton
-│   ├── src/components/launcher   # HomeView, MultiplayerView, SettingsView, Sidebar
-│   └── src/components/providers  # Lenis Smooth Scroll + GSAP ScrollTrigger Provider
+├── TheSpikeLauncher.exe          # 빌드 완료된 독립 실행형 런처 (.exe)
+├── 실행하기.bat                  # 파이썬 개발 환경 실행기
 ├── src/                          # 파이썬 PyQt6 데스크톱 런처 소스코드
+│   └── main.py                   # 메인 GUI 및 클라이언트 네트워크 로직
 ├── server/                       # 중앙 매칭 및 중계 백엔드 (오라클 클라우드)
-├── scripts/                      # 자동화 스크립트 (run_web.bat, build_exe.bat 등)
-├── 웹런처_실행하기.bat           # 원클릭 모던 웹 런처 실행기
-└── 실행하기.bat                  # 루트 데스크톱 앱 실행기
+│   ├── server.py                 # TCP 로비 및 세션 중계 서버
+│   ├── bot.py                    # 가상 테스트 봇
+│   └── the-spike-server.service  # systemd 서비스 등록 파일
+├── scripts/                      # 편의 스크립트 모음
+│   ├── run_dev.bat               # 개발 모드 실행 (src/main.py)
+│   └── build_exe.bat             # PyInstaller 단일 .exe 빌드 자동화
+├── requirements.txt              # 파이썬 의존성 목록 (PyQt6, pyinstaller)
+├── .gitignore                    # Git 버전 관리 제외 설정
+└── README.md                     # 프로젝트 문서
 ```
 
 ---
@@ -34,8 +38,8 @@ pip install -r requirements.txt
 
 ### 3. 클라이언트 실행 (개발 모드)
 ```bash
-# 스크립트 이용
-scripts\run_dev.bat
+# 루트 실행기 더블 클릭 또는
+실행하기.bat
 
 # 또는 직접 실행
 python src/main.py
@@ -51,7 +55,8 @@ python src/main.py
 scripts\build_exe.bat
 ```
 
-빌드가 완료되면 `dist/TheSpikeLauncher.exe` 파일이 생성됩니다. 이 파일 하나만 유저들에게 전달하면 설치 과정 없이 즉시 실행됩니다.
+빌드가 완료되면 `dist/TheSpikeLauncher.exe` 파일이 생성됩니다.
+루트에 위치한 `TheSpikeLauncher.exe`는 최신 안정화 버전으로 즉시 배포 및 실행이 가능합니다.
 
 ---
 

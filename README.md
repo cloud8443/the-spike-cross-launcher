@@ -7,19 +7,16 @@
 ## 📁 프로젝트 디렉토리 구조
 
 ```plaintext
-├── src/                          # 클라이언트 소스코드
-│   └── main.py                   # PyQt6 기반 런처 GUI 애플리케이션
-├── server/                       # 중앙 매칭 및 중계 백엔드
-│   ├── server.py                 # 비동기(asyncio) TCP 로비/채팅 중계 서버
-│   ├── the-spike-server.service  # Linux systemd 데몬 등록 파일
-│   └── bot.py                    # 원격 테스트용 AI 봇 스크립트
-├── scripts/                      # 자동화 스크립트
-│   ├── build_exe.bat             # PyInstaller를 이용한 단일 .exe 빌드 스크립트
-│   └── run_dev.bat               # 개발용 클라이언트 실행 스크립트
-├── dist/                         # 빌드 완료된 배포용 실행 파일 (TheSpikeLauncher.exe)
-├── requirements.txt              # 개발 환경 필수 라이브러리 목록
-├── .gitignore                    # Git 버전 관리 제외 목록
-└── 실행하기.bat                  # 루트 실행용 바로가기 배치 파일
+├── frontend/                     # 차세대 모션 웹 런처 (GSAP, Lenis, React Bits, Magic UI, shadcn)
+│   ├── src/components/react-bits # ShinyText, DecryptedText, Particles, SpotlightCard
+│   ├── src/components/magic-ui   # BentoGrid, BorderBeam, Marquee, ShimmerButton
+│   ├── src/components/launcher   # HomeView, MultiplayerView, SettingsView, Sidebar
+│   └── src/components/providers  # Lenis Smooth Scroll + GSAP ScrollTrigger Provider
+├── src/                          # 파이썬 PyQt6 데스크톱 런처 소스코드
+├── server/                       # 중앙 매칭 및 중계 백엔드 (오라클 클라우드)
+├── scripts/                      # 자동화 스크립트 (run_web.bat, build_exe.bat 등)
+├── 웹런처_실행하기.bat           # 원클릭 모던 웹 런처 실행기
+└── 실행하기.bat                  # 루트 데스크톱 앱 실행기
 ```
 
 ---

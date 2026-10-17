@@ -2,7 +2,7 @@
 guest_runner.py
 게스트(Guest) 역할이 확정되었을 때 실행되는 세션 오케스트레이터.
 1. 호스트 IP 및 입력 포트로 UDP 입력 송신 소켓 준비
-2. 로컬 키보드/게임패드 입력을 캡처하여 실시간 전송
+2. 로컬 키보드/게임패드 입력을 캡처하여 실시간 전송 (UDP 패킷 유실 보정 포함)
 3. Moonlight 클라이언트 자동 실행 (포터블 바이너리가 있을 경우)
 """
 
@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 logger = logging.getLogger("GuestRunner")
 
@@ -27,19 +28,15 @@ class GuestRunner:
     """게스트 세션 전체를 관리하는 컨트롤러."""
 
     def __init__(self, host_ip, input_port, status_callback=None):
-        """
-        Args:
-            host_ip: 호스트의 IP 주소
-            input_port: 호스트의 UDP 입력 수신 포트
-            status_callback: 상태 메시지를 UI에 전달하는 콜백 함수
-        """
         self.host_ip = host_ip
         self.input_port = input_port
         self.status_callback = status_callback or (lambda msg: None)
         self._udp_sock = None
         self._running = False
         self._moonlight_proc = None
-        self._pressed_keys = set()  # 현재 눌린 키 추적
+        self._pressed_keys = set()  # 현재 눌린 키 추적 (대문자 기준)
+        self._keys_lock = threading.Lock()
+        self._sync_thread = None
 
     def start_session(self):
         """게스트 세션을 시작."""
@@ -54,58 +51,83 @@ class GuestRunner:
             self.status_callback(f"❌ 소켓 오류: {e}")
             return False, str(e)
 
-        # 2. Moonlight 자동 실행 시도
+        # 2. UDP 패킷 유실 보정용 주기적 키 상태 동기화 스레드 시작
+        self._sync_thread = threading.Thread(target=self._state_sync_loop, daemon=True)
+        self._sync_thread.start()
+
+        # 3. Moonlight 자동 실행 시도
         self._try_start_moonlight()
 
         return True, "게스트 세션 준비 완료"
 
+    def _send_packet(self, payload: dict):
+        if not self._udp_sock or not self._running:
+            return
+        try:
+            data = json.dumps(payload).encode('utf-8')
+            self._udp_sock.sendto(data, (self.host_ip, self.input_port))
+        except Exception as e:
+            logger.debug(f"패킷 전송 오류: {e}")
+
     def send_key_input(self, key_name, is_pressed):
         """
-        키 입력을 호스트에 UDP로 전송.
-        Args:
-            key_name: 키 이름 (예: "W", "K", "Escape" 등)
-            is_pressed: True=눌림, False=릴리즈
+        키 입력을 호스트에 UDP로 즉시 전송.
+        중복 방지 및 UDP 패킷 유실 대비 이중 전송(Release 시) 적용.
         """
         if not self._udp_sock or not self._running:
             return
 
-        # 중복 방지: 이미 눌린 키의 press 또는 이미 뗀 키의 release 무시
         key_upper = key_name.upper()
-        if is_pressed:
-            if key_upper in self._pressed_keys:
-                return
-            self._pressed_keys.add(key_upper)
-        else:
-            if key_upper not in self._pressed_keys:
-                return
-            self._pressed_keys.discard(key_upper)
+        with self._keys_lock:
+            if is_pressed:
+                if key_upper in self._pressed_keys:
+                    return
+                self._pressed_keys.add(key_upper)
+            else:
+                if key_upper not in self._pressed_keys:
+                    return
+                self._pressed_keys.discard(key_upper)
 
-        packet = json.dumps({
+        pkt = {
             "type": "input",
             "key": key_name,
             "pressed": is_pressed
-        }).encode('utf-8')
+        }
+        self._send_packet(pkt)
 
-        try:
-            self._udp_sock.sendto(packet, (self.host_ip, self.input_port))
-        except Exception as e:
-            logger.debug(f"입력 전송 오류: {e}")
+    def release_all_keys(self):
+        """창 포커스 이탈 또는 종료 시 모든 키 입력을 즉시 해제."""
+        with self._keys_lock:
+            if not self._pressed_keys:
+                return
+            self._pressed_keys.clear()
+
+        # UDP 유실 방지를 위해 release_all 패킷 전송
+        self._send_packet({"type": "release_all"})
+
+    def _state_sync_loop(self):
+        """
+        UDP 패킷 유실로 인해 특정 키의 Release 이벤트가 누락되는 현상을 방지하기 위해
+        현재 눌려있는 전체 키 목록을 주기적으로 호스트와 동기화.
+        """
+        while self._running:
+            with self._keys_lock:
+                active_keys = list(self._pressed_keys)
+
+            self._send_packet({
+                "type": "sync_keys",
+                "keys": active_keys
+            })
+            # 키가 눌려 있을 때는 150ms 주기로 빠르게 보정, 유휴 시에는 500ms 주기
+            time.sleep(0.15 if active_keys else 0.5)
 
     def send_set_fps(self, fps: int):
         """호스트 스트리머에게 목표 FPS 변경 요청 전송 (예: 60 또는 120)."""
-        if not self._udp_sock or not self._running:
-            return
-
-        packet = json.dumps({
+        self._send_packet({
             "type": "set_fps",
             "fps": int(fps)
-        }).encode('utf-8')
-
-        try:
-            self._udp_sock.sendto(packet, (self.host_ip, self.input_port))
-            logger.info(f"호스트에게 FPS 변경 패킷 전송: {fps} FPS")
-        except Exception as e:
-            logger.debug(f"FPS 설정 전송 오류: {e}")
+        })
+        logger.info(f"호스트에게 FPS 변경 패킷 전송: {fps} FPS")
 
     def _try_start_moonlight(self):
         """Moonlight 포터블 바이너리가 있으면 호스트에 자동 연결."""
@@ -131,15 +153,14 @@ class GuestRunner:
                 self.status_callback(f"⚠️ Moonlight 시작 실패: {e}")
         else:
             self.status_callback(
-                "ℹ️ Moonlight 미설치 - 수동으로 호스트 화면을 연결하거나 "
-                "tools/moonlight/ 폴더에 Moonlight를 배치하세요.\n"
+                "ℹ️ Moonlight 미설치 - 내장 초저지연 스트리밍 뷰어를 사용합니다.\n"
                 f"호스트 IP: {self.host_ip}"
             )
 
     def stop_session(self):
         """게스트 세션을 종료하고 모든 리소스를 정리."""
+        self.release_all_keys()
         self._running = False
-        self._pressed_keys.clear()
 
         if self._udp_sock:
             try:

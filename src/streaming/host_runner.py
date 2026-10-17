@@ -3,8 +3,8 @@ host_runner.py
 호스트(Host) 역할이 확정되었을 때 실행되는 세션 오케스트레이터.
 1. 가상 Xbox 360 2P 패드 생성 (ViGEmBus)
 2. 스팀 게임 자동 실행
-3. 게스트 입력 수신용 UDP 서버 가동
-4. Sunshine 스트리밍 데몬 관리 (포터블 바이너리가 있을 경우)
+3. 게스트 입력 수신용 UDP 서버 가동 (패킷 유실 복구 및 Watchdog 포함)
+4. 실시간 화면 공유 서버 및 Sunshine 스트리밍 데몬 관리
 """
 
 import json
@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 
 from src.streaming.virtual_controller import VirtualGamepadManager, KeymapManager
@@ -36,10 +37,6 @@ class HostRunner:
     """호스트 세션 전체를 관리하는 컨트롤러."""
 
     def __init__(self, status_callback=None):
-        """
-        Args:
-            status_callback: 상태 메시지를 UI에 전달하는 콜백 함수 (str -> None)
-        """
         self.gamepad_manager = VirtualGamepadManager()
         self.keymap_manager = KeymapManager()
         self.status_callback = status_callback or (lambda msg: None)
@@ -50,16 +47,18 @@ class HostRunner:
         self.local_ip = self._get_local_ip()
         self.input_port = INPUT_UDP_PORT
         self.stream_port = STREAM_PORT
-        self.screen_streamer = ScreenStreamer(port=self.stream_port, status_callback=self.status_callback, target_fps=120)
+        self.screen_streamer = ScreenStreamer(
+            port=self.stream_port,
+            status_callback=self.status_callback,
+            target_fps=120
+        )
 
     def _get_local_ip(self):
-        """로컬 IP 주소를 가져옴 (P2P 시그널링 전달용)."""
+        """로컬 IP 주소를 가져옴 (소켓 자동 정리 보장)."""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
         except Exception:
             return "127.0.0.1"
 
@@ -109,16 +108,25 @@ class HostRunner:
         """게스트 입력 패킷을 수신하는 UDP 서버를 백그라운드 스레드로 가동."""
         self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._udp_sock.settimeout(1.0)
+        self._udp_sock.settimeout(0.5)
         self._udp_sock.bind(("0.0.0.0", self.input_port))
 
         def receiver_loop():
             logger.info(f"입력 수신 UDP 서버 시작 (포트 {self.input_port})")
+            last_packet_time = time.perf_counter()
+            watchdog_released = True
+
             while self._running:
                 try:
-                    data, addr = self._udp_sock.recvfrom(256)
+                    data, _ = self._udp_sock.recvfrom(512)
+                    last_packet_time = time.perf_counter()
+                    watchdog_released = False
                     self._process_input_packet(data)
                 except socket.timeout:
+                    # 2초 이상 게스트로부터 아무런 패킷이 없으면 모든 버튼 강제 해제 (무한 눌림 방어)
+                    if not watchdog_released and (time.perf_counter() - last_packet_time > 2.0):
+                        self.gamepad_manager.release_all()
+                        watchdog_released = True
                     continue
                 except Exception as e:
                     if self._running:
@@ -128,30 +136,35 @@ class HostRunner:
         self._input_thread.start()
 
     def _process_input_packet(self, raw_data):
-        """
-        게스트 입력 UDP 패킷을 파싱하여 가상 패드에 주입.
-        패킷 형식 (JSON):
-        {"type": "input", "key": "W", "pressed": true}
-        """
+        """게스트 입력 UDP 패킷을 파싱하여 가상 패드에 주입."""
         try:
             pkt = json.loads(raw_data.decode('utf-8'))
             pkt_type = pkt.get("type")
 
-            if pkt_type == "set_fps":
+            if pkt_type == "input":
+                key_name = pkt.get("key", "")
+                is_pressed = bool(pkt.get("pressed", False))
+                xbox_btn = self.keymap_manager.key_to_xbox_button(key_name)
+                if xbox_btn:
+                    self.gamepad_manager.update_input(xbox_btn, is_pressed)
+
+            elif pkt_type == "release_all":
+                self.gamepad_manager.release_all()
+
+            elif pkt_type == "sync_keys":
+                active_keys = pkt.get("keys", [])
+                active_xbox_btns = {
+                    self.keymap_manager.key_to_xbox_button(k)
+                    for k in active_keys
+                }
+                active_xbox_btns.discard(None)
+                self.gamepad_manager.sync_pressed_buttons(active_xbox_btns)
+
+            elif pkt_type == "set_fps":
                 fps = int(pkt.get("fps", 120))
                 self.screen_streamer.set_fps(fps)
-                return
 
-            if pkt_type != "input":
-                return
-            key_name = pkt.get("key", "")
-            is_pressed = pkt.get("pressed", False)
-
-            # 키보드 키 -> Xbox 버튼으로 변환
-            xbox_btn = self.keymap_manager.key_to_xbox_button(key_name)
-            if xbox_btn:
-                self.gamepad_manager.update_input(xbox_btn, is_pressed)
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.debug(f"입력 패킷 파싱 오류: {e}")
 
     def _try_start_sunshine(self):
@@ -168,10 +181,9 @@ class HostRunner:
                 )
                 self.status_callback("✅ Sunshine 스트리밍 데몬 활성화")
             except Exception as e:
-                self.status_callback(f"⚠️ Sunshine 시작 실패 (수동 스트리밍 필요): {e}")
+                self.status_callback(f"⚠️ Sunshine 시작 실패 (내장 스트리머 동작 중): {e}")
         else:
-            self.status_callback("ℹ️ Sunshine 미설치 - 수동으로 화면 공유를 설정하거나 "
-                                 "tools/sunshine/ 폴더에 Sunshine을 배치하세요.")
+            self.status_callback("ℹ️ 내장 초저지연(120 FPS) 화면 공유 서버로 동작합니다.")
 
     def get_connection_info(self):
         """게스트에게 전달할 연결 정보를 반환."""

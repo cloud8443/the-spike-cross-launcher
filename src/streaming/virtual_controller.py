@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import logging
+import threading
 
 logger = logging.getLogger("VirtualController")
 
@@ -19,9 +20,6 @@ def resource_path(relative_path):
     return os.path.join(os.path.abspath("."), relative_path)
 
 
-# 키보드 키 이름 -> Xbox 360 패드 버튼 이름 역방향 매핑을 런타임에 생성
-# keymap.json 형식: { "게임액션": "키보드키" }
-# 게임액션 -> Xbox 버튼 고정 매핑:
 ACTION_TO_XBOX = {
     "UP":            "DPAD_UP",
     "DOWN":          "DPAD_DOWN",
@@ -32,6 +30,14 @@ ACTION_TO_XBOX = {
     "BLOCK":         "Y",
     "SPECIAL_TOSS":  "B",
     "PAUSE":         "START",
+}
+
+# 방향키 등 보조 기본 키 매핑 (사용자가 다른 액션에 할당하지 않았을 경우 자동 동작)
+FALLBACK_KEY_TO_XBOX = {
+    "UP":    "DPAD_UP",
+    "DOWN":  "DPAD_DOWN",
+    "LEFT":  "DPAD_LEFT",
+    "RIGHT": "DPAD_RIGHT",
 }
 
 
@@ -54,8 +60,8 @@ class KeymapManager:
         if config_path is None:
             config_path = resource_path(os.path.join("config", "keymap.json"))
         self.config_path = config_path
-        self.action_map = dict(self.DEFAULT_MAP)  # action -> keyboard key
-        self._key_to_xbox = {}  # keyboard key -> xbox button name
+        self.action_map = dict(self.DEFAULT_MAP)
+        self._key_to_xbox = {}
         self.load()
 
     def load(self):
@@ -65,7 +71,7 @@ class KeymapManager:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 for action in self.DEFAULT_MAP:
-                    if action in data:
+                    if action in data and isinstance(data[action], str):
                         self.action_map[action] = data[action]
         except Exception as e:
             logger.warning(f"keymap.json 로드 실패, 기본값 사용: {e}")
@@ -82,14 +88,16 @@ class KeymapManager:
 
     def _rebuild_reverse_map(self):
         """keyboard key -> xbox button name 역방향 매핑 재구축."""
-        self._key_to_xbox = {}
+        self._key_to_xbox = dict(FALLBACK_KEY_TO_XBOX)
         for action, key in self.action_map.items():
             xbox_btn = ACTION_TO_XBOX.get(action)
-            if xbox_btn:
+            if xbox_btn and key:
                 self._key_to_xbox[key.upper()] = xbox_btn
 
     def key_to_xbox_button(self, key_name):
         """키보드 키 이름을 Xbox 버튼 이름으로 변환. 매핑에 없으면 None."""
+        if not key_name:
+            return None
         return self._key_to_xbox.get(key_name.upper())
 
     def set_mapping(self, action, key):
@@ -115,11 +123,14 @@ class KeymapManager:
 
 
 class VirtualGamepadManager:
-    """ViGEmBus 가상 Xbox 360 패드를 관리."""
+    """ViGEmBus 가상 Xbox 360 패드를 스레드 안전하게 관리."""
 
     def __init__(self):
         self.gamepad = None
-        self._vgamepad = None  # lazy import
+        self._vgamepad = None
+        self._button_map = {}
+        self._pressed_buttons = set()
+        self._lock = threading.Lock()
 
     def initialize(self):
         """가상 Xbox 360 컨트롤러를 생성. (성공여부, 메시지) 튜플 반환."""
@@ -127,6 +138,21 @@ class VirtualGamepadManager:
             import vgamepad as vg
             self._vgamepad = vg
             self.gamepad = vg.VX360Gamepad()
+            self._button_map = {
+                "A":          vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
+                "B":          vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
+                "X":          vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
+                "Y":          vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
+                "START":      vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
+                "BACK":       vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
+                "DPAD_UP":    vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
+                "DPAD_DOWN":  vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
+                "DPAD_LEFT":  vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
+                "DPAD_RIGHT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
+                "LB":         vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
+                "RB":         vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
+            }
+            self._pressed_buttons.clear()
             logger.info("ViGEmBus 가상 Xbox 360 패드 생성 완료")
             return True, "가상 Xbox 360 패드가 정상적으로 생성되었습니다."
         except ImportError:
@@ -139,48 +165,72 @@ class VirtualGamepadManager:
 
     def update_input(self, xbox_button_name, is_pressed):
         """Xbox 버튼 이름(문자열)으로 가상 패드 입력을 갱신."""
-        if not self.gamepad or not self._vgamepad:
-            return
-
-        vg = self._vgamepad
-        button_map = {
-            "A":          vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
-            "B":          vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
-            "X":          vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
-            "Y":          vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
-            "START":      vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
-            "BACK":       vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
-            "DPAD_UP":    vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
-            "DPAD_DOWN":  vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
-            "DPAD_LEFT":  vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
-            "DPAD_RIGHT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
-            "LB":         vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
-            "RB":         vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
-        }
-
-        btn = button_map.get(xbox_button_name)
+        btn = self._button_map.get(xbox_button_name)
         if btn is None:
             return
 
-        if is_pressed:
-            self.gamepad.press_button(button=btn)
-        else:
-            self.gamepad.release_button(button=btn)
-        self.gamepad.update()
+        with self._lock:
+            if not self.gamepad:
+                return
+            if is_pressed:
+                if xbox_button_name in self._pressed_buttons:
+                    return
+                self._pressed_buttons.add(xbox_button_name)
+                self.gamepad.press_button(button=btn)
+            else:
+                if xbox_button_name not in self._pressed_buttons:
+                    return
+                self._pressed_buttons.discard(xbox_button_name)
+                self.gamepad.release_button(button=btn)
+            self.gamepad.update()
+
+    def sync_pressed_buttons(self, active_button_names: set):
+        """게스트의 현재 눌린 버튼 집합과 호스트 패드 상태를 동기화 (패킷 유실 복구)."""
+        with self._lock:
+            if not self.gamepad:
+                return
+            changed = False
+
+            # 게스트에서는 뗐는데 호스트에 눌려있는 버튼 해제
+            for btn_name in list(self._pressed_buttons):
+                if btn_name not in active_button_names:
+                    btn = self._button_map.get(btn_name)
+                    if btn is not None:
+                        self.gamepad.release_button(button=btn)
+                        changed = True
+                    self._pressed_buttons.discard(btn_name)
+
+            # 게스트에서 눌렸는데 호스트에 안 눌려있는 버튼 입력
+            for btn_name in active_button_names:
+                if btn_name not in self._pressed_buttons:
+                    btn = self._button_map.get(btn_name)
+                    if btn is not None:
+                        self.gamepad.press_button(button=btn)
+                        self._pressed_buttons.add(btn_name)
+                        changed = True
+
+            if changed:
+                self.gamepad.update()
 
     def release_all(self):
         """모든 버튼을 릴리즈 (중립 상태로 복귀)."""
-        if self.gamepad:
-            self.gamepad.reset()
-            self.gamepad.update()
+        with self._lock:
+            if self.gamepad and self._pressed_buttons:
+                self._pressed_buttons.clear()
+                self.gamepad.reset()
+                self.gamepad.update()
 
     def cleanup(self):
         """가상 패드를 제거하고 리소스를 해제."""
-        if self.gamepad:
-            try:
-                self.release_all()
-            except Exception:
-                pass
-            self.gamepad = None
-            self._vgamepad = None
-            logger.info("가상 패드 해제 완료")
+        with self._lock:
+            if self.gamepad:
+                try:
+                    self._pressed_buttons.clear()
+                    self.gamepad.reset()
+                    self.gamepad.update()
+                except Exception:
+                    pass
+                self.gamepad = None
+                self._vgamepad = None
+                self._button_map.clear()
+                logger.info("가상 패드 해제 완료")

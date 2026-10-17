@@ -70,6 +70,17 @@ from PyQt6.QtGui import QFont, QColor
 DEFAULT_SERVER_HOST = "146.56.101.107"
 DEFAULT_SERVER_PORT = 5555
 
+def get_local_lan_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 # -------------------------------------------------------------
 # 최고급 모던 게이밍 다크 QSS 스타일시트
 # -------------------------------------------------------------
@@ -322,7 +333,9 @@ class SpikeLauncher(QMainWindow):
         self.server_host = DEFAULT_SERVER_HOST
         self.server_port = DEFAULT_SERVER_PORT
         self.sock = None
+        self.send_lock = threading.Lock()
         self.is_connected = False
+        self.is_connecting = False
         self.is_running = True
         self.my_client_id = ""
         self.my_name = "플레이어"
@@ -342,6 +355,11 @@ class SpikeLauncher(QMainWindow):
 
         self.init_ui()
         self.connect_to_server()
+
+        # 주기적 방 목록 자동 폴링 타이머 (2.5초 간격)
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.auto_refresh_tick)
+        self.refresh_timer.start(2500)
 
     def init_ui(self):
         self.setStyleSheet(MODERN_STYLE_SHEET)
@@ -457,6 +475,7 @@ class SpikeLauncher(QMainWindow):
         self.input_room_name = QLineEdit()
         self.input_room_name.setPlaceholderText("개설할 방 제목 입력 (예: 고수만 오세요)")
         self.input_room_name.setFixedHeight(40)
+        self.input_room_name.returnPressed.connect(self.create_room)
         
         self.btn_create_room = QPushButton("방 만들기")
         self.btn_create_room.setProperty("class", "SuccessButton")
@@ -468,11 +487,24 @@ class SpikeLauncher(QMainWindow):
         create_box.addWidget(self.btn_create_room)
         friendly_layout.addLayout(create_box)
 
-        lbl_room_list = QLabel("📋 실시간 공개 방 목록 (자동 검색)")
+        # 방 목록 상단 헤더 + 수동 새로고침 버튼
+        room_header_layout = QHBoxLayout()
+        lbl_room_list = QLabel("📋 실시간 공개 방 목록 (PC & 모바일 실시간 연동)")
         lbl_room_list.setStyleSheet("font-size: 14px; font-weight: bold; color: #ffffff; margin-top: 5px;")
-        friendly_layout.addWidget(lbl_room_list)
+        
+        self.btn_refresh_rooms = QPushButton("🔄 새로고침")
+        self.btn_refresh_rooms.setProperty("class", "PrimaryButton")
+        self.btn_refresh_rooms.setFixedHeight(34)
+        self.btn_refresh_rooms.setFixedWidth(110)
+        self.btn_refresh_rooms.clicked.connect(self.request_room_list)
+
+        room_header_layout.addWidget(lbl_room_list)
+        room_header_layout.addStretch()
+        room_header_layout.addWidget(self.btn_refresh_rooms)
+        friendly_layout.addLayout(room_header_layout)
 
         self.room_list_widget = QListWidget()
+        self.room_list_widget.itemDoubleClicked.connect(lambda _: self.join_selected_room())
         friendly_layout.addWidget(self.room_list_widget)
 
         self.btn_join_selected = QPushButton("선택한 방 입장하기")
@@ -620,6 +652,14 @@ class SpikeLauncher(QMainWindow):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
+        # 멀티플레이(공방) 탭 진입 시 즉시 방 목록 갱신 요청
+        if idx == 1 and self.current_room_id is None:
+            self.request_room_list()
+
+    def auto_refresh_tick(self):
+        if self.is_connected and self.current_room_id is None:
+            self.request_room_list()
+
     def bind_signals(self):
         self.signals.connected.connect(self.on_server_connected)
         self.signals.disconnected.connect(self.on_server_disconnected)
@@ -640,16 +680,26 @@ class SpikeLauncher(QMainWindow):
     # 네트워크 통신 루프
     # =========================================================
     def connect_to_server(self):
+        if self.is_connecting:
+            return
+        self.is_connecting = True
+
         def worker():
             try:
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.connect((self.server_host, self.server_port))
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                s.settimeout(5.0)
+                s.connect((self.server_host, self.server_port))
+                s.settimeout(None)
+
+                self.sock = s
                 self.is_connected = True
+                self.is_connecting = False
                 self.signals.connected.emit()
 
                 buffer = ""
                 while self.is_running and self.is_connected:
-                    data = self.sock.recv(4096)
+                    data = s.recv(4096)
                     if not data:
                         break
                     buffer += data.decode('utf-8', errors='ignore')
@@ -663,6 +713,7 @@ class SpikeLauncher(QMainWindow):
                 pass
             finally:
                 self.is_connected = False
+                self.is_connecting = False
                 self.signals.disconnected.emit()
 
         threading.Thread(target=worker, daemon=True).start()
@@ -672,9 +723,10 @@ class SpikeLauncher(QMainWindow):
             return
         try:
             payload = (json.dumps(data, ensure_ascii=False) + '\n').encode('utf-8')
-            self.sock.sendall(payload)
+            with self.send_lock:
+                self.sock.sendall(payload)
         except Exception:
-            pass
+            self.is_connected = False
 
     def handle_server_message(self, line):
         try:
@@ -682,7 +734,7 @@ class SpikeLauncher(QMainWindow):
         except Exception:
             return
 
-        mtype = msg.get('type')
+        mtype = msg.get('type') or msg.get('action', '').lower()
         if mtype == 'welcome':
             self.my_client_id = msg.get('client_id', '')
             self.my_name = msg.get('name', '플레이어')
@@ -739,6 +791,13 @@ class SpikeLauncher(QMainWindow):
 
     def update_room_list_ui(self, rooms, online_count):
         self.lbl_sidebar_online_count.setText(f"접속자: {online_count}명")
+
+        # 현재 선택되어 있던 방 ID 보존
+        selected_room_id = None
+        curr_item = self.room_list_widget.currentItem()
+        if curr_item:
+            selected_room_id = curr_item.data(Qt.ItemDataRole.UserRole)
+
         self.room_list_widget.clear()
 
         if not rooms:
@@ -748,11 +807,20 @@ class SpikeLauncher(QMainWindow):
             return
 
         for r in rooms:
-            status_badge = "대기 중 (1/2)" if r['user_count'] < r['max_users'] else "진행 중 (2/2)"
-            display = f"🏠 {r['room_name']}   |   방장: {r['host_name']}   |   [{status_badge}]"
+            r_id = r.get('room_id') or r.get('code', '')
+            r_name = r.get('room_name') or r.get('title', '친선 방')
+            h_name = r.get('host_name', '방장')
+            u_cnt = r.get('user_count', r.get('players', 1))
+            max_u = r.get('max_users', 2)
+
+            status_badge = f"대기 중 ({u_cnt}/{max_u})" if u_cnt < max_u else f"진행 중 ({u_cnt}/{max_u})"
+            display = f"🏠 {r_name}   |   코드: {r_id}   |   방장: {h_name}   |   [{status_badge}]"
             item = QListWidgetItem(display)
-            item.setData(Qt.ItemDataRole.UserRole, r['room_id'])
+            item.setData(Qt.ItemDataRole.UserRole, r_id)
             self.room_list_widget.addItem(item)
+
+            if selected_room_id and r_id == selected_room_id:
+                self.room_list_widget.setCurrentItem(item)
 
     def request_room_list(self):
         self.send_json({'action': 'get_rooms'})
@@ -766,7 +834,12 @@ class SpikeLauncher(QMainWindow):
         if not room_name:
             room_name = "나의 친선 방"
 
-        self.send_json({'action': 'create_room', 'room_name': room_name})
+        local_ip = get_local_lan_ip()
+        self.send_json({
+            'action': 'create_room',
+            'room_name': room_name,
+            'local_ip': local_ip
+        })
 
     def on_room_created(self, data):
         self.cleanup_streaming()
@@ -774,11 +847,12 @@ class SpikeLauncher(QMainWindow):
         self.my_role = 'host'
         room_name = data['room_name']
 
-        self.lbl_current_room_title.setText(f"🏠 방 제목: [{room_name}] (방장)")
-        self.lbl_connection_status.setText("상태: 상대방의 입장을 기다리는 중...")
+        self.lbl_current_room_title.setText(f"🏠 방 제목: [{room_name}] (코드: {self.current_room_id})")
+        self.lbl_connection_status.setText("상태: 상대방(PC 또는 모바일)의 입장을 기다리는 중...")
         self.lbl_connection_status.setStyleSheet("color: #10b981; font-size: 13px; font-weight: bold;")
         self.chat_display.clear()
-        self.chat_display.addItem("[안내] 방이 개설되었습니다. 상대를 기다리는 중입니다.")
+        self.chat_display.addItem(f"[안내] 방이 개설되었습니다! (방 코드: {self.current_room_id})")
+        self.chat_display.addItem("[안내] PC 또는 모바일 앱에서 방 목록을 클릭하거나 코드를 입력해 입장할 수 있습니다.")
         self.multi_stacked.setCurrentIndex(1)
 
     def join_selected_room(self):
@@ -804,8 +878,8 @@ class SpikeLauncher(QMainWindow):
         room_name = data['room_name']
         host_name = data.get('host_name', '방장')
 
-        self.lbl_current_room_title.setText(f"🏠 방 입장: 🏠 {room_name}")
-        self.lbl_connection_status.setText(f"상태: 🟢 방장과 연결되었습니다! 대화가 가능합니다.")
+        self.lbl_current_room_title.setText(f"🏠 방 입장: {room_name} (코드: {self.current_room_id})")
+        self.lbl_connection_status.setText(f"상태: 🟢 방장({host_name})과 연결되었습니다! 대화가 가능합니다.")
         self.lbl_connection_status.setStyleSheet("color: #10b981; font-size: 13px; font-weight: bold;")
         self.chat_display.clear()
         self.chat_display.addItem(f"[시스템] 🏠 {room_name} 방에 성공적으로 입장했습니다!")
@@ -869,7 +943,7 @@ class SpikeLauncher(QMainWindow):
         self.chat_input.clear()
 
     def on_chat_received(self, sender, msg):
-        self.chat_display.addItem(f"상대방: {msg}")
+        self.chat_display.addItem(f"{sender}: {msg}")
         self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
     def leave_room(self):
@@ -895,7 +969,11 @@ class SpikeLauncher(QMainWindow):
             return
         self.btn_claim_host.setEnabled(False)
         self.btn_claim_host.setText("⏳ 호스트 환경 준비 요청 중...")
-        self.send_json({'action': 'claim_host', 'room_id': self.current_room_id})
+        self.send_json({
+            'action': 'claim_host',
+            'room_id': self.current_room_id,
+            'host_ip': get_local_lan_ip()
+        })
 
     def on_session_started(self, data):
         role = data.get('role')
@@ -919,13 +997,14 @@ class SpikeLauncher(QMainWindow):
             ok, msg = self.host_runner.start_session()
             if ok:
                 conn_info = self.host_runner.get_connection_info()
+                host_ip = conn_info.get('host_ip') or get_local_lan_ip()
                 self.signaling.send_host_info(
                     self.current_room_id,
-                    conn_info['host_ip'],
+                    host_ip,
                     conn_info['input_port'],
                     conn_info.get('stream_port', 47998)
                 )
-                self.chat_display.addItem(f"[안내] 게스트에게 화면 공유 및 연결 정보를 전송했습니다.")
+                self.chat_display.addItem(f"[안내] 게스트에게 화면 공유 및 연결 정보({host_ip})를 전송했습니다.")
             else:
                 self.chat_display.addItem(f"[오류] 호스트 시작 실패: {msg}")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
@@ -1019,7 +1098,11 @@ class SpikeLauncher(QMainWindow):
             self.server_host = new_host
             self.server_port = new_port
             if self.sock:
-                self.sock.close()
+                try:
+                    self.sock.close()
+                except Exception:
+                    pass
+            self.is_connected = False
             self.connect_to_server()
             QMessageBox.information(self, "설정 완료", f"서버 주소가 {new_host}:{new_port}로 변경되었습니다.")
         except ValueError:
@@ -1027,6 +1110,7 @@ class SpikeLauncher(QMainWindow):
 
     def closeEvent(self, event):
         self.is_running = False
+        self.refresh_timer.stop()
         self.cleanup_streaming()
         try:
             if self.current_room_id:

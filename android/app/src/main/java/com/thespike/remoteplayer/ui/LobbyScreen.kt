@@ -64,7 +64,7 @@ fun LobbyScreen(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = if (isConnected) "● OCI 매칭 서버 (146.56.101.107:5555) 연결됨" else "○ 매칭 서버 연결 중...",
+                    text = if (isConnected) "● OCI 매칭 서버 (146.56.101.107:5555) 실시간 연동됨" else "○ 매칭 서버 연결 중...",
                     color = if (isConnected) Color(0xFF4CAF50) else Color(0xFFFF5252),
                     fontSize = 13.sp
                 )
@@ -82,8 +82,8 @@ fun LobbyScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
                             value = roomCodeInput,
-                            onValueChange = { roomCodeInput = it.uppercase() },
-                            placeholder = { Text("4~6자리 코드 입력", color = Color.Gray) },
+                            onValueChange = { roomCodeInput = it.trim() },
+                            placeholder = { Text("6자리 방 코드 입력", color = Color.Gray) },
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -94,7 +94,7 @@ fun LobbyScreen(
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Button(
-                            onClick = { if (roomCodeInput.isNotBlank()) onJoinByCode(roomCodeInput) },
+                            onClick = { if (roomCodeInput.isNotBlank()) onJoinByCode(roomCodeInput.trim()) },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFB300)),
                             modifier = Modifier.height(54.dp)
                         ) {
@@ -104,7 +104,7 @@ fun LobbyScreen(
                 }
             }
 
-            // 호스트 IP 직접 연결 카드 (LAN/Tailscale/수동 연결 지원)
+            // 호스트 PC IP 직접 연결 카드 (LAN/Tailscale/수동 연결 지원)
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E24)),
                 shape = RoundedCornerShape(12.dp),
@@ -153,7 +153,7 @@ fun LobbyScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("실시간 대기 방 목록", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("실시간 대기 방 목록 (${rooms.size})", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     IconButton(onClick = onRefresh) {
                         Icon(Icons.Default.Refresh, contentDescription = "새로고침", tint = Color.White)
                     }
@@ -162,11 +162,11 @@ fun LobbyScreen(
 
                 if (rooms.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("현재 생성된 대기 방이 없습니다.", color = Color.Gray)
+                        Text("현재 생성된 대기 방이 없습니다. (자동 검색 중...)", color = Color.Gray)
                     }
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(rooms) { room ->
+                        items(rooms, key = { it.code }) { room ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -178,10 +178,22 @@ fun LobbyScreen(
                             ) {
                                 Column {
                                     Text(room.title, color = Color.White, fontWeight = FontWeight.Bold)
-                                    Text("코드: ${room.code} | 호스트: ${room.hostIp}", color = Color.Gray, fontSize = 12.sp)
+                                    val ipDisplay = if (room.hostIp.isNotBlank()) " | IP: ${room.hostIp}" else ""
+                                    Text(
+                                        text = "방장: ${room.hostName} | 코드: ${room.code}$ipDisplay",
+                                        color = Color.Gray,
+                                        fontSize = 12.sp
+                                    )
                                 }
-                                Badge(containerColor = Color(0xFFFFB300)) {
-                                    Text("${room.playerCount}/2", color = Color.Black, modifier = Modifier.padding(4.dp))
+                                Badge(
+                                    containerColor = if (room.playerCount < 2) Color(0xFFFFB300) else Color(0xFFEF5350)
+                                ) {
+                                    Text(
+                                        text = "${room.playerCount}/2",
+                                        color = Color.Black,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
                                 }
                             }
                         }

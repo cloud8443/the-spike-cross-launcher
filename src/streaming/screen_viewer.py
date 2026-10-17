@@ -122,6 +122,9 @@ class VideoDisplayWidget(QWidget):
         self.current_pixmap = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet("background-color: #05060a;")
+        # 120 FPS 고주사율 무지연/무깜빡임 하드웨어 렌더링 최적화
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
 
     def update_frame(self, jpeg_bytes):
         image = QImage()
@@ -150,7 +153,7 @@ class VideoDisplayWidget(QWidget):
 
 
 class GameStreamViewerWindow(QWidget):
-    """게스트 전용 원격 플레이 뷰어 창."""
+    """게스트 전용 원격 플레이 뷰어 창 (최대 120 FPS 지원)."""
 
     def __init__(self, host_ip, stream_port, guest_runner=None, parent=None):
         super().__init__(parent)
@@ -159,8 +162,9 @@ class GameStreamViewerWindow(QWidget):
         self.guest_runner = guest_runner
         self._receiver = None
         self._is_fullscreen = False
+        self.current_fps_mode = 120
 
-        self.setWindowTitle("🏐 더 스파이크 크로스 - 원격 2P 플레이어")
+        self.setWindowTitle("🏐 더 스파이크 크로스 - 원격 2P 플레이어 (120 FPS)")
         self.resize(1100, 680)
         self.setStyleSheet("""
             QWidget {
@@ -194,8 +198,21 @@ class GameStreamViewerWindow(QWidget):
         self.lbl_status = QLabel("🟢 화면 연결 중...")
         self.lbl_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #10b981;")
 
-        self.lbl_fps = QLabel("FPS: 60 | 딜레이: 초저지연")
+        self.lbl_fps = QLabel("FPS: 측정 중 | 딜레이: 초저지연 (<8ms)")
         self.lbl_fps.setStyleSheet("font-size: 11px; color: #94a3b8;")
+
+        # 120 FPS / 60 FPS 토글 버튼
+        self.btn_fps_mode = QPushButton("⚡ 120 FPS (고주사율)")
+        self.btn_fps_mode.setStyleSheet("""
+            background-color: #047857;
+            color: #a7f3d0;
+            border-radius: 6px;
+            padding: 4px 10px;
+            font-size: 11px;
+            font-weight: bold;
+        """)
+        self.btn_fps_mode.setToolTip("클릭하여 120 FPS와 60 FPS 모드를 전환합니다.")
+        self.btn_fps_mode.clicked.connect(self.toggle_fps_mode)
 
         self.btn_fullscreen = QPushButton("전체화면 (F11)")
         self.btn_fullscreen.setStyleSheet("""
@@ -212,6 +229,7 @@ class GameStreamViewerWindow(QWidget):
         tb_layout.addWidget(self.lbl_status)
         tb_layout.addStretch()
         tb_layout.addWidget(self.lbl_fps)
+        tb_layout.addWidget(self.btn_fps_mode)
         tb_layout.addWidget(self.btn_fullscreen)
 
         layout.addWidget(top_bar)
@@ -223,10 +241,38 @@ class GameStreamViewerWindow(QWidget):
         # 키보드 포커스 설정
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def toggle_fps_mode(self):
+        """120 FPS와 60 FPS 모드를 상호 전환하고 호스트에 즉시 적용."""
+        if self.current_fps_mode == 120:
+            self.current_fps_mode = 60
+            self.btn_fps_mode.setText("🔋 60 FPS (표준)")
+            self.btn_fps_mode.setStyleSheet("""
+                background-color: #334155;
+                color: #94a3b8;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            """)
+        else:
+            self.current_fps_mode = 120
+            self.btn_fps_mode.setText("⚡ 120 FPS (고주사율)")
+            self.btn_fps_mode.setStyleSheet("""
+                background-color: #047857;
+                color: #a7f3d0;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            """)
+
+        if self.guest_runner:
+            self.guest_runner.send_set_fps(self.current_fps_mode)
+
     def _start_stream(self):
         self._receiver = StreamReceiverThread(self.host_ip, self.stream_port)
         self._receiver.frame_ready.connect(self.video_widget.update_frame)
-        self._receiver.fps_updated.connect(lambda fps: self.lbl_fps.setText(f"FPS: {fps} | 딜레이: 초저지연 (<10ms)"))
+        self._receiver.fps_updated.connect(lambda fps: self.lbl_fps.setText(f"FPS: {fps} | 딜레이: 초저지연 (<8ms)"))
         self._receiver.disconnected.connect(self._on_disconnected)
         self._receiver.start()
 

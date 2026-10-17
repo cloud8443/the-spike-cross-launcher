@@ -50,7 +50,7 @@ class HostRunner:
         self.local_ip = self._get_local_ip()
         self.input_port = INPUT_UDP_PORT
         self.stream_port = STREAM_PORT
-        self.screen_streamer = ScreenStreamer(port=self.stream_port, status_callback=self.status_callback)
+        self.screen_streamer = ScreenStreamer(port=self.stream_port, status_callback=self.status_callback, target_fps=120)
 
     def _get_local_ip(self):
         """로컬 IP 주소를 가져옴 (P2P 시그널링 전달용)."""
@@ -135,7 +135,14 @@ class HostRunner:
         """
         try:
             pkt = json.loads(raw_data.decode('utf-8'))
-            if pkt.get("type") != "input":
+            pkt_type = pkt.get("type")
+
+            if pkt_type == "set_fps":
+                fps = int(pkt.get("fps", 120))
+                self.screen_streamer.set_fps(fps)
+                return
+
+            if pkt_type != "input":
                 return
             key_name = pkt.get("key", "")
             is_pressed = pkt.get("pressed", False)

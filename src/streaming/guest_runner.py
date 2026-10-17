@@ -91,6 +91,22 @@ class GuestRunner:
         except Exception as e:
             logger.debug(f"입력 전송 오류: {e}")
 
+    def send_set_fps(self, fps: int):
+        """호스트 스트리머에게 목표 FPS 변경 요청 전송 (예: 60 또는 120)."""
+        if not self._udp_sock or not self._running:
+            return
+
+        packet = json.dumps({
+            "type": "set_fps",
+            "fps": int(fps)
+        }).encode('utf-8')
+
+        try:
+            self._udp_sock.sendto(packet, (self.host_ip, self.input_port))
+            logger.info(f"호스트에게 FPS 변경 패킷 전송: {fps} FPS")
+        except Exception as e:
+            logger.debug(f"FPS 설정 전송 오류: {e}")
+
     def _try_start_moonlight(self):
         """Moonlight 포터블 바이너리가 있으면 호스트에 자동 연결."""
         moonlight_path = resource_path(os.path.join("tools", "moonlight", "Moonlight.exe"))

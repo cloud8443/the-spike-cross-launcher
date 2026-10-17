@@ -3,6 +3,7 @@ package com.thespike.remoteplayer.network
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.DataInputStream
@@ -34,32 +35,32 @@ class StreamReceiver(
     private val _statusMessage = MutableStateFlow("호스트($hostIp:$port)에 연결 준비 중...")
     val statusMessage: StateFlow<String> = _statusMessage
 
-    // 최신 프레임 홀더: 이전 미처리 프레임을 즉시 덮어써서 0ms 지연 유지
-    private val latestFrameHolder = AtomicReference<FramePacket?>()
+    // 무충돌 트리플 버퍼:
+    // 1) writePacket: 소켓 스레드가 현재 네트워크에서 데이터를 채우는 전용 버퍼
+    // 2) latestFrameHolder: 가장 최신의 완성된 프레임이 대기하는 원자적 슬롯
+    // 3) freePacketHolder: 디코딩이 끝난 빈 버퍼를 소켓 스레드에 돌려주는 원자적 슬롯
+    private val latestFrameHolder = AtomicReference<FramePacket?>(null)
+    private val freePacketHolder = AtomicReference<FramePacket>(FramePacket(ByteArray(256 * 1024)))
 
-    // 0-Allocation 패킷 트리플 버퍼 (네트워크 수신 시 메모리 할당 0바이트)
-    private val packetPool = arrayOf(
-        FramePacket(ByteArray(512 * 1024)),
-        FramePacket(ByteArray(512 * 1024)),
-        FramePacket(ByteArray(512 * 1024))
-    )
-    private var currentPacketIndex = 0
+    // 새 프레임 도착 시 디코더를 0ms 만에 즉시 깨우는 경량 신호 채널 (CONFLATED)
+    private val frameSignal = Channel<Unit>(Channel.CONFLATED)
 
-    // 0-Garbage Collection 더블 비트맵 버퍼
+    // 0-GC 더블 비트맵 버퍼
     private var bitmapBufferA: Bitmap? = null
     private var bitmapBufferB: Bitmap? = null
     private var useBufferA = true
-    private val tempStorage = ByteArray(64 * 1024)
+    private val tempStorage = ByteArray(32 * 1024)
 
     fun start() {
         if (job?.isActive == true) return
         job = scope.launch {
             var attempt = 0
 
-            // 1. 디코딩/렌더링 전용 고속 백그라운드 코루틴 (소켓 I/O와 완전 분리)
+            // 1. 디코딩/렌더링 전용 고속 코루틴 (소켓 수신과 버퍼 메모리 완전 분리)
             val renderJob = launch(Dispatchers.Default) {
                 var frameCount = 0
                 var lastFpsTimestamp = System.currentTimeMillis()
+                var renderPacket = FramePacket(ByteArray(256 * 1024))
 
                 val decodeOptions = BitmapFactory.Options().apply {
                     inMutable = true
@@ -69,34 +70,61 @@ class StreamReceiver(
                 }
 
                 while (isActive) {
-                    val packet = latestFrameHolder.getAndSet(null)
-                    if (packet == null) {
-                        // 대기 중인 새 프레임이 없으면 아주 짧게 양보 (1ms)
-                        delay(1)
-                        continue
-                    }
+                    // 새 프레임 신호 대기 (폴링 지연 0ms)
+                    frameSignal.receiveCatching()
+
+                    val incoming = latestFrameHolder.getAndSet(null) ?: continue
 
                     val targetBuffer = if (useBufferA) bitmapBufferA else bitmapBufferB
                     decodeOptions.inBitmap = targetBuffer
 
                     var decoded: Bitmap? = null
                     try {
-                        decoded = BitmapFactory.decodeByteArray(packet.data, 0, packet.size, decodeOptions)
+                        decoded = BitmapFactory.decodeByteArray(
+                            incoming.data,
+                            0,
+                            incoming.size,
+                            decodeOptions
+                        )
                     } catch (e: IllegalArgumentException) {
+                        // 해상도 변경(예: 720p -> 480p) 시 비트맵 풀 즉시 재할당
                         decodeOptions.inBitmap = null
-                        decoded = BitmapFactory.decodeByteArray(packet.data, 0, packet.size, decodeOptions)
+                        decoded = BitmapFactory.decodeByteArray(
+                            incoming.data,
+                            0,
+                            incoming.size,
+                            decodeOptions
+                        )
                         if (decoded != null) {
-                            bitmapBufferA = Bitmap.createBitmap(decoded.width, decoded.height, Bitmap.Config.RGB_565)
-                            bitmapBufferB = Bitmap.createBitmap(decoded.width, decoded.height, Bitmap.Config.RGB_565)
+                            bitmapBufferA = Bitmap.createBitmap(
+                                decoded.width,
+                                decoded.height,
+                                Bitmap.Config.RGB_565
+                            )
+                            bitmapBufferB = Bitmap.createBitmap(
+                                decoded.width,
+                                decoded.height,
+                                Bitmap.Config.RGB_565
+                            )
                         }
                     } catch (_: Exception) {
                         decoded = null
                     }
 
+                    // 사용이 끝난 incoming 패킷을 재사용 풀에 반납하고, 이전 renderPacket을 교체
+                    val oldFree = freePacketHolder.getAndSet(incoming)
+                    if (oldFree != null) {
+                        renderPacket = oldFree
+                    }
+
                     if (decoded != null) {
                         if (bitmapBufferA == null) {
                             bitmapBufferA = decoded
-                            bitmapBufferB = Bitmap.createBitmap(decoded.width, decoded.height, Bitmap.Config.RGB_565)
+                            bitmapBufferB = Bitmap.createBitmap(
+                                decoded.width,
+                                decoded.height,
+                                Bitmap.Config.RGB_565
+                            )
                         }
 
                         if (!_isStreaming.value) {
@@ -117,7 +145,9 @@ class StreamReceiver(
                 }
             }
 
-            // 2. 고속 네트워크 소켓 수신 루프 (디코딩을 기다리지 않고 소켓을 즉각 비워 TCP 백프레셔 제거)
+            // 2. 고속 네트워크 소켓 수신 루프
+            var writePacket = FramePacket(ByteArray(256 * 1024))
+
             while (isActive) {
                 attempt++
                 var socket: Socket? = null
@@ -127,7 +157,7 @@ class StreamReceiver(
                     socket = Socket()
                     socket.tcpNoDelay = true
                     socket.soTimeout = 4000
-                    socket.receiveBufferSize = 128 * 1024 // 초저지연 버퍼
+                    socket.receiveBufferSize = 64 * 1024 // 480p 초경량 프레임에 맞춘 저지연 수신 버퍼
                     socket.connect(InetSocketAddress(hostIp, port), 3500)
 
                     val input = DataInputStream(socket.getInputStream())
@@ -135,23 +165,26 @@ class StreamReceiver(
 
                     while (isActive) {
                         val frameSize = input.readInt()
-                        if (frameSize <= 0 || frameSize > 10 * 1024 * 1024) {
+                        if (frameSize <= 0 || frameSize > 5 * 1024 * 1024) {
                             break
                         }
 
-                        val packet = packetPool[currentPacketIndex % packetPool.size]
-                        currentPacketIndex++
-
-                        if (packet.data.size < frameSize) {
-                            packet.data = ByteArray((frameSize * 1.5).toInt())
+                        if (writePacket.data.size < frameSize) {
+                            writePacket.data = ByteArray((frameSize * 1.3).toInt())
                         }
-                        packet.size = frameSize
+                        writePacket.size = frameSize
 
-                        // 소켓에서 페이로드를 즉시 끝까지 수신
-                        input.readFully(packet.data, 0, frameSize)
+                        // 소켓에서 페이로드를 끝까지 읽음 (렌더 스레드와 절대 겹치지 않는 독립 버퍼)
+                        input.readFully(writePacket.data, 0, frameSize)
 
-                        // 원자적 교체: 렌더러가 이전 프레임을 아직 그리고 있더라도 항상 가장 최신 프레임으로 덮어씀 (지연 시간 0)
-                        latestFrameHolder.set(packet)
+                        // 최신 프레임을 홀더에 등록하고, 만약 아직 소비되지 않은 이전 프레임이 있었다면 즉시 회수하여 재사용!
+                        val unconsumed = latestFrameHolder.getAndSet(writePacket)
+                        writePacket = unconsumed
+                            ?: freePacketHolder.getAndSet(null)
+                            ?: FramePacket(ByteArray(256 * 1024))
+
+                        // 디코더 코루틴 즉시 깨우기
+                        frameSignal.trySend(Unit)
                     }
                 } catch (e: ConnectException) {
                     _statusMessage.value = "호스트 화면 공유 대기 중... (재시도 #$attempt)\n호스트가 시작 버튼을 눌렀는지 확인해주세요."

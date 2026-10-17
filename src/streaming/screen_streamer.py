@@ -49,6 +49,7 @@ class ScreenStreamer:
         self._thread = None
         self.fps_counter = 0
         self.target_hwnd = None
+        self.detected_game_info = None
         self._last_window_search = 0.0
         self._fallback_cache = {}
 
@@ -60,30 +61,159 @@ class ScreenStreamer:
         logger.info(f"⚡ 목표 스트리밍 FPS 변경: {fps} FPS (프레임 간격: {self.frame_interval*1000:.2f}ms)")
         self.status_callback(f"⚡ 화면 스트리밍 FPS가 {fps} FPS로 변경되었습니다.")
 
+    def _get_process_name_by_pid(self, pid: int) -> str:
+        """PID로 프로세스 실행 파일명 조회 (초고속/무권한 kernel32 API)."""
+        if not pid:
+            return ""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.windll.kernel32
+            h_proc = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h_proc:
+                return ""
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                if k32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
+                    return buf.value.split("\\")[-1].lower()
+            finally:
+                k32.CloseHandle(h_proc)
+        except Exception:
+            pass
+        return ""
+
     def find_game_window(self):
-        """'The Spike' 게임 윈도우 핸들(HWND)을 검색 (1초 쿨다운으로 오버헤드 방지)."""
+        """
+        'The Spike Cross' 게임 윈도우 핸들(HWND)을 프로세스명 및 타이틀 기반으로 정밀 검색.
+        1. TheSpike-Cross.exe 등 실행 파일명 직접 매칭 (100% 무오류)
+        2. 윈도우 타이틀("the spike", "더 스파이크" 등) 매칭
+        3. 전체 화면/창 모드 중 가장 면적이 넓은 메인 렌더링 윈도우 자동 선택
+        """
         if not HAS_WIN32:
             return None
 
         now = time.perf_counter()
         if now - self._last_window_search < 1.0:
-            return None
+            return self.target_hwnd
         self._last_window_search = now
 
-        found_hwnd = None
+        candidates = []
 
         def enum_cb(hwnd, _):
-            nonlocal found_hwnd
-            if win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd):
-                title = win32gui.GetWindowText(hwnd)
-                if "the spike" in title.lower() or "spike cross" in title.lower():
-                    found_hwnd = hwnd
+            if not win32gui.IsWindow(hwnd):
+                return True
+            if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                return True
+
+            try:
+                rect = win32gui.GetWindowRect(hwnd)
+                w = rect[2] - rect[0]
+                h = rect[3] - rect[1]
+                if w < 160 or h < 160:
+                    return True
+
+                title = win32gui.GetWindowText(hwnd).strip()
+                title_lower = title.lower()
+
+                # PID 및 프로세스명 획득
+                pname = ""
+                try:
+                    import win32process
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    pname = self._get_process_name_by_pid(pid)
+                except Exception:
+                    pass
+
+                # 런처 자체나 브라우저 제외
+                if pname in ("thespikelauncher.exe", "antigravity.exe", "msedge.exe", "chrome.exe") or "launcher" in pname:
+                    return True
+
+                # 1순위: TheSpike-Cross.exe, TheSpike.exe 등 게임 프로세스명 일치 (가장 완벽)
+                is_spike_proc = ("thespike" in pname) or ("spike-cross" in pname) or (pname.startswith("spike") and "launcher" not in pname)
+
+                # 2순위: 윈도우 타이틀 일치 (스팀 웹 브라우저/스토어 창 제외)
+                is_spike_title = (
+                    "the spike" in title_lower or
+                    "spike cross" in title_lower or
+                    "더 스파이크" in title_lower or
+                    "더스파이크" in title_lower
+                ) and ("steam" not in pname)
+
+                if is_spike_proc or is_spike_title:
+                    score = 100 if is_spike_proc else 80
+                    candidates.append({
+                        "hwnd": hwnd,
+                        "title": title,
+                        "proc": pname or "TheSpike-Cross.exe",
+                        "width": w,
+                        "height": h,
+                        "score": score
+                    })
+            except Exception:
+                pass
+            return True
 
         try:
+            # 1. 일반 EnumWindows 스캔
             win32gui.EnumWindows(enum_cb, None)
         except Exception:
             pass
-        return found_hwnd
+
+        # 2. 대화형 데스크톱(WinSta0\Default) 보완 스캔 (필요 시)
+        if not candidates:
+            try:
+                import ctypes
+                from ctypes import wintypes
+                u32 = ctypes.windll.user32
+                desk = u32.OpenDesktopW('Default', 0, False, 0x10000000)
+                if desk:
+                    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+                    u32.EnumDesktopWindows(desk, WNDENUMPROC(enum_cb), 0)
+            except Exception:
+                pass
+
+        if candidates:
+            # 신뢰도 점수 및 창 면적이 가장 큰 메인 게임 화면 선택
+            candidates.sort(key=lambda x: (x["score"], x["width"] * x["height"]), reverse=True)
+            best = candidates[0]
+            self.detected_game_info = best
+            return best["hwnd"]
+
+        self.detected_game_info = None
+        return None
+
+    def get_detection_status(self):
+        """현재 게임 창 감지 여부 및 상세 스펙을 튜플 (is_detected: bool, info: dict)로 반환."""
+        if self.target_hwnd and win32gui.IsWindow(self.target_hwnd) and not win32gui.IsIconic(self.target_hwnd):
+            info = self.detected_game_info or {}
+            rect = win32gui.GetWindowRect(self.target_hwnd)
+            w = max(1, rect[2] - rect[0])
+            h = max(1, rect[3] - rect[1])
+            return True, {
+                "hwnd": self.target_hwnd,
+                "title": info.get("title") or win32gui.GetWindowText(self.target_hwnd) or "The Spike Cross",
+                "proc": info.get("proc", "TheSpike-Cross.exe"),
+                "width": w,
+                "height": h
+            }
+
+        # 미감지 상태일 시 즉시 탐색 1회 시도
+        found = self.find_game_window()
+        if found:
+            self.target_hwnd = found
+            info = self.detected_game_info or {}
+            rect = win32gui.GetWindowRect(found)
+            w = max(1, rect[2] - rect[0])
+            h = max(1, rect[3] - rect[1])
+            return True, {
+                "hwnd": found,
+                "title": info.get("title") or win32gui.GetWindowText(found) or "The Spike Cross",
+                "proc": info.get("proc", "TheSpike-Cross.exe"),
+                "width": w,
+                "height": h
+            }
+        return False, None
 
     def capture_frame(self):
         """
@@ -96,7 +226,11 @@ class ScreenStreamer:
 
         # 유효한 게임 윈도우 확인 (최소화 상태이거나 닫혔으면 재탐색)
         if not self.target_hwnd or not win32gui.IsWindow(self.target_hwnd) or win32gui.IsIconic(self.target_hwnd):
-            self.target_hwnd = self.find_game_window()
+            new_hwnd = self.find_game_window()
+            if new_hwnd:
+                self.target_hwnd = new_hwnd
+            else:
+                self.target_hwnd = None
 
         hwnd = self.target_hwnd or win32gui.GetDesktopWindow()
 

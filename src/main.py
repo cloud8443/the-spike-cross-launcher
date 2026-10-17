@@ -439,15 +439,39 @@ class SpikeLauncher(QMainWindow):
         lbl_hero = QLabel("더 스파이크 크로스 (The Spike Cross)")
         lbl_hero.setObjectName("HeroTitle")
         
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(12)
+
         self.btn_launch = QPushButton("게임 시작 (Steam)")
         self.btn_launch.setObjectName("BtnLaunchGame")
         self.btn_launch.clicked.connect(self.launch_game)
+
+        self.btn_test_detect = QPushButton("🎯 게임 감지 테스트")
+        self.btn_test_detect.setFixedHeight(44)
+        self.btn_test_detect.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #38bdf8;
+                font-weight: bold;
+                border: 1px solid #0284c7;
+                border-radius: 10px;
+                padding: 0 16px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        self.btn_test_detect.clicked.connect(self.test_game_window_detection)
+
+        btn_box.addWidget(self.btn_launch)
+        btn_box.addWidget(self.btn_test_detect)
 
         self.lbl_status = QLabel("상태: 준비 완료")
         self.lbl_status.setStyleSheet("font-size: 13px; font-weight: bold; color: #10b981;")
 
         hero_layout.addWidget(lbl_hero)
-        hero_layout.addWidget(self.btn_launch)
+        hero_layout.addLayout(btn_box)
         hero_layout.addWidget(self.lbl_status)
 
         home_layout.addWidget(hero_card)
@@ -572,6 +596,10 @@ class SpikeLauncher(QMainWindow):
         self.lbl_streaming_status.setStyleSheet("font-size: 13px; color: #38bdf8; font-weight: bold;")
         self.lbl_streaming_status.setVisible(False)
 
+        self.lbl_game_detect_status = QLabel("")
+        self.lbl_game_detect_status.setStyleSheet("font-size: 12px; color: #10b981; font-weight: bold;")
+        self.lbl_game_detect_status.setVisible(False)
+
         self.btn_room_leave = QPushButton("방 나가기")
         self.btn_room_leave.setProperty("class", "DangerButton")
         self.btn_room_leave.setFixedHeight(42)
@@ -581,6 +609,7 @@ class SpikeLauncher(QMainWindow):
         room_waiting_layout.addWidget(self.lbl_connection_status)
         room_waiting_layout.addWidget(self.btn_claim_host)
         room_waiting_layout.addWidget(self.lbl_streaming_status)
+        room_waiting_layout.addWidget(self.lbl_game_detect_status)
         room_waiting_layout.addWidget(QLabel("💬 실시간 대화창"))
         room_waiting_layout.addWidget(self.chat_display)
         room_waiting_layout.addLayout(chat_input_layout)
@@ -629,6 +658,12 @@ class SpikeLauncher(QMainWindow):
         self.btn_install_vigem.clicked.connect(self.install_vigembus_driver_manual)
         fb_layout.addWidget(self.btn_install_vigem)
 
+        self.btn_detect_test = QPushButton("🎯 게임 화면 감지 진단 테스트")
+        self.btn_detect_test.setProperty("class", "SecondaryButton")
+        self.btn_detect_test.setFixedHeight(40)
+        self.btn_detect_test.clicked.connect(self.test_game_window_detection)
+        fb_layout.addWidget(self.btn_detect_test)
+
         settings_layout.addWidget(form_box)
         settings_layout.addStretch()
 
@@ -665,6 +700,24 @@ class SpikeLauncher(QMainWindow):
     def auto_refresh_tick(self):
         if self.is_connected and self.current_room_id is None:
             self.request_room_list()
+
+        # 호스트 스트리밍 중 실시간 게임 창 감지 상태 갱신
+        if self.streaming_role == 'streaming_host' and self.host_runner:
+            try:
+                is_det, info = self.host_runner.get_game_detection_status()
+                self.lbl_game_detect_status.setVisible(True)
+                if is_det and info:
+                    self.lbl_game_detect_status.setText(
+                        f"🎯 게임 감지 완료: [{info.get('proc')}] {info.get('title')} ({info.get('width')}x{info.get('height')}) 단독 공유 중"
+                    )
+                    self.lbl_game_detect_status.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+                else:
+                    self.lbl_game_detect_status.setText(
+                        "🖥️ 게임 대기 중: The Spike 미실행 (전체 데스크톱 임시 공유 중 - 실행 시 자동 감지)"
+                    )
+                    self.lbl_game_detect_status.setStyleSheet("color: #f59e0b; font-size: 12px; font-weight: bold;")
+            except Exception:
+                pass
 
     def bind_signals(self):
         self.signals.connected.connect(self.on_server_connected)
@@ -924,6 +977,8 @@ class SpikeLauncher(QMainWindow):
         self.btn_claim_host.setText("🚀 내가 호스트로 시작하기")
         self.lbl_streaming_status.setVisible(False)
         self.lbl_streaming_status.setText("")
+        self.lbl_game_detect_status.setVisible(False)
+        self.lbl_game_detect_status.setText("")
 
     def on_peer_left(self, reason):
         self.cleanup_streaming()
@@ -1125,6 +1180,39 @@ class SpikeLauncher(QMainWindow):
             self.lbl_status.setText("상태: 스팀 실행 명령 전달됨")
         except Exception as e:
             self.lbl_status.setText(f"상태: 실행 오류 ({e})")
+
+    def test_game_window_detection(self):
+        """사용자가 직접 The Spike 게임 창이 정상적으로 감지되는지 즉시 테스트합니다."""
+        try:
+            from src.streaming.screen_streamer import ScreenStreamer
+        except ImportError:
+            from streaming.screen_streamer import ScreenStreamer
+
+        streamer = ScreenStreamer()
+        detected, info = streamer.get_detection_status()
+        if detected and info:
+            QMessageBox.information(
+                self,
+                "게임 창 감지 성공",
+                f"🎉 The Spike 게임 창이 성공적으로 감지되었습니다!\n\n"
+                f"• 프로세스명: {info.get('proc')}\n"
+                f"• 윈도우 제목: {info.get('title')}\n"
+                f"• 창 해상도:  {info.get('width')} x {info.get('height')}\n"
+                f"• 윈도우 HWND: {info.get('hwnd')}\n\n"
+                f"✅ 호스트 세션 진행 시 게스트에게 The Spike 게임 화면만 선명하게 단독 공유됩니다!"
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "게임 창 미감지 안내",
+                "ℹ️ 현재 실행 중인 'The Spike' 게임 창이 감지되지 않았습니다.\n\n"
+                "• 이유 1: 아직 게임(스팀)을 실행하지 않았습니다.\n"
+                "• 이유 2: 게임 창이 작업표시줄로 '최소화(_)' 상태입니다.\n\n"
+                "💡 걱정하지 마세요:\n"
+                "게임이 아직 실행되지 않은 상태에서 호스트를 시작하더라도,\n"
+                "1) 먼저 전체 데스크톱 화면이 안전하게 공유되고\n"
+                "2) 게임을 실행하는 즉시 The Spike 게임 화면으로 1초 만에 자동 전환됩니다!"
+            )
 
     def reconnect_with_new_settings(self):
         new_host = self.input_server_host.text().strip()

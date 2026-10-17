@@ -228,6 +228,10 @@ class HostRunner:
         else:
             self.status_callback("ℹ️ 내장 초저지연(120 FPS) 화면 공유 서버로 동작합니다.")
 
+    def get_game_detection_status(self):
+        """현재 화면 스트리머가 The Spike 게임 창을 감지했는지 확인 (bool, dict)."""
+        return self.screen_streamer.get_detection_status()
+
     def get_connection_info(self):
         """게스트에게 전달할 연결 정보를 반환."""
         return {

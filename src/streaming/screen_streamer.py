@@ -49,9 +49,34 @@ class ScreenStreamer:
         self._thread = None
         self.fps_counter = 0
         self.target_hwnd = None
+        self.manual_target_hwnd = None
         self.detected_game_info = None
         self._last_window_search = 0.0
         self._fallback_cache = {}
+
+    def set_target_window(self, hwnd=None):
+        """
+        사용자가 수동으로 캡처할 윈도우를 선택/지정합니다.
+        - None 또는 -1: 🎯 The Spike Cross 자동 감지 모드
+        - 0: 🖥️ 전체 데스크톱 화면 공유 모드
+        - > 0: 🪟 특정 창(HWND) 단독 공유 모드
+        """
+        if hwnd is None or hwnd == -1:
+            self.manual_target_hwnd = None
+            self.target_hwnd = None
+            logger.info("화면 공유 모드: 🎯 The Spike Cross 자동 감지")
+            self.status_callback("🎯 화면 공유 모드: The Spike Cross 자동 감지")
+        elif hwnd == 0:
+            self.manual_target_hwnd = 0
+            self.target_hwnd = None
+            logger.info("화면 공유 모드: 🖥️ 전체 데스크톱 화면")
+            self.status_callback("🖥️ 화면 공유 모드: 전체 데스크톱 화면")
+        else:
+            self.manual_target_hwnd = hwnd
+            self.target_hwnd = hwnd
+            title = win32gui.GetWindowText(hwnd) if HAS_WIN32 and win32gui.IsWindow(hwnd) else f"HWND {hwnd}"
+            logger.info(f"화면 공유 모드: 🪟 지정 창 ({title})")
+            self.status_callback(f"🪟 화면 공유 모드: [{title}] 단독 공유")
 
     def set_fps(self, fps: int):
         """목표 스트리밍 FPS를 동적으로 변경 (예: 60 또는 120)."""
@@ -184,7 +209,47 @@ class ScreenStreamer:
         return None
 
     def get_detection_status(self):
-        """현재 게임 창 감지 여부 및 상세 스펙을 튜플 (is_detected: bool, info: dict)로 반환."""
+        """현재 화면 캡처 대상 및 감지 상태를 튜플 (is_detected: bool, info: dict)로 반환."""
+        if not HAS_WIN32:
+            return False, None
+
+        # 1. 수동 전체 화면 모드
+        if self.manual_target_hwnd == 0:
+            d_hwnd = win32gui.GetDesktopWindow()
+            rect = win32gui.GetWindowRect(d_hwnd)
+            return True, {
+                "hwnd": 0,
+                "title": "전체 화면 (데스크톱)",
+                "proc": "Desktop",
+                "width": max(1, rect[2] - rect[0]),
+                "height": max(1, rect[3] - rect[1]),
+                "mode": "desktop"
+            }
+
+        # 2. 수동 특정 윈도우 모드
+        if self.manual_target_hwnd is not None and self.manual_target_hwnd > 0:
+            if win32gui.IsWindow(self.manual_target_hwnd) and not win32gui.IsIconic(self.manual_target_hwnd):
+                rect = win32gui.GetWindowRect(self.manual_target_hwnd)
+                title = win32gui.GetWindowText(self.manual_target_hwnd) or f"Window {self.manual_target_hwnd}"
+                return True, {
+                    "hwnd": self.manual_target_hwnd,
+                    "title": title,
+                    "proc": "수동 선택 창",
+                    "width": max(1, rect[2] - rect[0]),
+                    "height": max(1, rect[3] - rect[1]),
+                    "mode": "manual"
+                }
+            else:
+                return False, {
+                    "hwnd": self.manual_target_hwnd,
+                    "title": "선택된 창이 최소화되었거나 닫힘 (데스크톱 임시 공유 중)",
+                    "proc": "Desktop Fallback",
+                    "width": 1280,
+                    "height": 720,
+                    "mode": "fallback"
+                }
+
+        # 3. The Spike Cross 자동 감지 모드
         if self.target_hwnd and win32gui.IsWindow(self.target_hwnd) and not win32gui.IsIconic(self.target_hwnd):
             info = self.detected_game_info or {}
             rect = win32gui.GetWindowRect(self.target_hwnd)
@@ -195,7 +260,8 @@ class ScreenStreamer:
                 "title": info.get("title") or win32gui.GetWindowText(self.target_hwnd) or "The Spike Cross",
                 "proc": info.get("proc", "TheSpike-Cross.exe"),
                 "width": w,
-                "height": h
+                "height": h,
+                "mode": "auto"
             }
 
         # 미감지 상태일 시 즉시 탐색 1회 시도
@@ -211,28 +277,38 @@ class ScreenStreamer:
                 "title": info.get("title") or win32gui.GetWindowText(found) or "The Spike Cross",
                 "proc": info.get("proc", "TheSpike-Cross.exe"),
                 "width": w,
-                "height": h
+                "height": h,
+                "mode": "auto"
             }
         return False, None
 
     def capture_frame(self):
         """
-        게임 윈도우가 있으면 해당 영역을 캡처하고,
-        없으면 기본 데스크톱 화면을 고속 GDI BitBlt로 캡처.
+        선택된 창(또는 자동 감지된 The Spike)을 캡처하고,
+        없거나 전체 화면 모드일 경우 데스크톱 화면을 고속 GDI BitBlt로 캡처.
         GDI 핸들 누수 방지를 위해 엄격한 try-finally 블록 적용.
         """
         if not HAS_WIN32:
             return self._get_fallback_frame("윈도우 API 비활성화")
 
-        # 유효한 게임 윈도우 확인 (최소화 상태이거나 닫혔으면 재탐색)
-        if not self.target_hwnd or not win32gui.IsWindow(self.target_hwnd) or win32gui.IsIconic(self.target_hwnd):
-            new_hwnd = self.find_game_window()
-            if new_hwnd:
-                self.target_hwnd = new_hwnd
+        # 1. 수동 지정 모드
+        if self.manual_target_hwnd is not None:
+            if self.manual_target_hwnd == 0:
+                hwnd = win32gui.GetDesktopWindow()
             else:
-                self.target_hwnd = None
-
-        hwnd = self.target_hwnd or win32gui.GetDesktopWindow()
+                if win32gui.IsWindow(self.manual_target_hwnd) and not win32gui.IsIconic(self.manual_target_hwnd):
+                    hwnd = self.manual_target_hwnd
+                else:
+                    hwnd = win32gui.GetDesktopWindow()
+        else:
+            # 2. 자동 감지 모드
+            if not self.target_hwnd or not win32gui.IsWindow(self.target_hwnd) or win32gui.IsIconic(self.target_hwnd):
+                new_hwnd = self.find_game_window()
+                if new_hwnd:
+                    self.target_hwnd = new_hwnd
+                else:
+                    self.target_hwnd = None
+            hwnd = self.target_hwnd or win32gui.GetDesktopWindow()
 
         hwnd_dc = None
         mfc_dc = None
@@ -474,3 +550,138 @@ class ScreenStreamer:
                 pass
             self._server_sock = None
         logger.info("화면 공유 서버 종료 완료")
+
+    @staticmethod
+    def list_capturable_windows():
+        """
+        현재 시스템에서 사용자가 선택해 공유할 수 있는 윈도우 목록을 반환합니다.
+        - [자동 감지] The Spike Cross
+        - [전체 화면] 전체 데스크톱 화면
+        - 실행 중인 창 목록 (The Spike 창은 최상단 우선 표시)
+        """
+        windows = [
+            {
+                "hwnd": -1,
+                "title": "🎯 [자동 감지] The Spike Cross (기본 권장)",
+                "proc": "auto",
+                "size": "자동"
+            },
+            {
+                "hwnd": 0,
+                "title": "🖥️ [전체 화면] 전체 데스크톱 화면 공유",
+                "proc": "desktop",
+                "size": "전체"
+            }
+        ]
+
+        if not HAS_WIN32:
+            return windows
+
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+
+        def _get_proc(pid):
+            if not pid:
+                return ""
+            h = k32.OpenProcess(0x1000, False, pid)
+            if not h:
+                return ""
+            try:
+                b = ctypes.create_unicode_buffer(1024)
+                s = wintypes.DWORD(1024)
+                if k32.QueryFullProcessImageNameW(h, 0, b, ctypes.byref(s)):
+                    return b.value.split("\\")[-1]
+            finally:
+                k32.CloseHandle(h)
+            return ""
+
+        seen_hwnds = set()
+        game_windows = []
+        normal_windows = []
+
+        def inspect_window(hwnd):
+            if hwnd in seen_hwnds:
+                return
+            seen_hwnds.add(hwnd)
+
+            if not u32.IsWindow(hwnd) or not u32.IsWindowVisible(hwnd) or u32.IsIconic(hwnd):
+                return
+
+            len_t = u32.GetWindowTextLengthW(hwnd)
+            if len_t <= 0:
+                return
+            buf = ctypes.create_unicode_buffer(len_t + 1)
+            u32.GetWindowTextW(hwnd, buf, len_t + 1)
+            title = buf.value.strip()
+            if not title:
+                return
+
+            rect = wintypes.RECT()
+            u32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w < 160 or h < 160:
+                return
+
+            ignored_titles = ["Program Manager", "Microsoft Text Input Application", "Settings", "설정"]
+            if title in ignored_titles:
+                return
+
+            pid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            proc = _get_proc(pid.value)
+            proc_lower = proc.lower()
+
+            if "thespikelauncher" in proc_lower:
+                return
+
+            is_spike = (
+                "spike" in proc_lower or 
+                "thespike" in proc_lower or 
+                "spike" in title.lower() or 
+                "더 스파이크" in title
+            ) and "steam" not in proc_lower
+
+            entry = {
+                "hwnd": hwnd,
+                "title": f"🎮 [게임] {title} ({w}x{h})" if is_spike else f"🪟 {title} ({proc}) [{w}x{h}]",
+                "proc": proc,
+                "size": f"{w}x{h}",
+                "is_spike": is_spike
+            }
+
+            if is_spike:
+                game_windows.append(entry)
+            else:
+                normal_windows.append(entry)
+
+        # 1. win32gui.EnumWindows 스캔
+        def enum_cb(h, _):
+            inspect_window(h)
+            return True
+
+        try:
+            win32gui.EnumWindows(enum_cb, None)
+        except Exception:
+            pass
+
+        # 2. 대화형 데스크톱(WinSta0\Default) 보완 스캔
+        try:
+            winsta0 = u32.OpenWindowStationW('WinSta0', False, 0x10000000)
+            if winsta0:
+                u32.SetProcessWindowStation(winsta0)
+            desk = u32.OpenDesktopW('Default', 0, False, 0x10000000)
+            if desk:
+                WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+                def d_cb(h, _):
+                    inspect_window(h)
+                    return True
+                u32.EnumDesktopWindows(desk, WNDENUMPROC(d_cb), 0)
+        except Exception:
+            pass
+
+        windows.extend(game_windows)
+        windows.extend(normal_windows)
+        return windows

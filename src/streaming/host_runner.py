@@ -228,6 +228,10 @@ class HostRunner:
         else:
             self.status_callback("ℹ️ 내장 초저지연(120 FPS) 화면 공유 서버로 동작합니다.")
 
+    def set_target_window(self, hwnd=None):
+        """스트리밍 화면 공유 대상을 지정 (None: 자동 감지, 0: 전체 화면, >0: 특정 창)."""
+        self.screen_streamer.set_target_window(hwnd)
+
     def get_game_detection_status(self):
         """현재 화면 스트리머가 The Spike 게임 창을 감지했는지 확인 (bool, dict)."""
         return self.screen_streamer.get_detection_status()

@@ -62,7 +62,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QLabel, 
     QVBoxLayout, QHBoxLayout, QWidget, QStackedWidget, 
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QFrame, QGraphicsDropShadowEffect
+    QComboBox, QFrame, QGraphicsDropShadowEffect
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QFont, QColor
@@ -600,6 +600,59 @@ class SpikeLauncher(QMainWindow):
         self.lbl_game_detect_status.setStyleSheet("font-size: 12px; color: #10b981; font-weight: bold;")
         self.lbl_game_detect_status.setVisible(False)
 
+        # 화면 공유 대상 선택 영역 (드롭다운 & 새로고침)
+        share_target_box = QHBoxLayout()
+        share_target_box.setSpacing(8)
+
+        lbl_target = QLabel("📺 공유 대상:")
+        lbl_target.setStyleSheet("color: #94a3b8; font-weight: bold; font-size: 12px;")
+
+        self.combo_capture_target = QComboBox()
+        self.combo_capture_target.setFixedHeight(34)
+        self.combo_capture_target.setStyleSheet("""
+            QComboBox {
+                background-color: #171a2d;
+                color: #f1f5f9;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 8px;
+                padding: 4px 10px;
+                font-size: 12px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #171a2d;
+                color: #f1f5f9;
+                selection-background-color: #0284c7;
+                selection-color: #ffffff;
+            }
+        """)
+        self.combo_capture_target.currentIndexChanged.connect(self.on_capture_target_changed)
+
+        self.btn_refresh_targets = QPushButton("🔄 창 목록 새로고침")
+        self.btn_refresh_targets.setFixedHeight(34)
+        self.btn_refresh_targets.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #38bdf8;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 8px;
+                font-size: 12px;
+                padding: 0 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        self.btn_refresh_targets.clicked.connect(self.populate_capture_targets)
+
+        share_target_box.addWidget(lbl_target)
+        share_target_box.addWidget(self.combo_capture_target, 1)
+        share_target_box.addWidget(self.btn_refresh_targets)
+
         self.btn_room_leave = QPushButton("방 나가기")
         self.btn_room_leave.setProperty("class", "DangerButton")
         self.btn_room_leave.setFixedHeight(42)
@@ -607,6 +660,7 @@ class SpikeLauncher(QMainWindow):
 
         room_waiting_layout.addWidget(self.lbl_current_room_title)
         room_waiting_layout.addWidget(self.lbl_connection_status)
+        room_waiting_layout.addLayout(share_target_box)
         room_waiting_layout.addWidget(self.btn_claim_host)
         room_waiting_layout.addWidget(self.lbl_streaming_status)
         room_waiting_layout.addWidget(self.lbl_game_detect_status)
@@ -684,6 +738,7 @@ class SpikeLauncher(QMainWindow):
         self.btn_settings.clicked.connect(lambda: self.switch_page(2))
 
         self.switch_page(0)
+        self.populate_capture_targets()
 
     def switch_page(self, idx):
         self.stacked_widget.setCurrentIndex(idx)
@@ -707,10 +762,18 @@ class SpikeLauncher(QMainWindow):
                 is_det, info = self.host_runner.get_game_detection_status()
                 self.lbl_game_detect_status.setVisible(True)
                 if is_det and info:
-                    self.lbl_game_detect_status.setText(
-                        f"🎯 게임 감지 완료: [{info.get('proc')}] {info.get('title')} ({info.get('width')}x{info.get('height')}) 단독 공유 중"
-                    )
-                    self.lbl_game_detect_status.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+                    mode = info.get("mode", "auto")
+                    if mode == "desktop":
+                        self.lbl_game_detect_status.setText("🖥️ [수동 모드] 전체 데스크톱 화면 공유 중")
+                        self.lbl_game_detect_status.setStyleSheet("color: #38bdf8; font-size: 12px; font-weight: bold;")
+                    elif mode == "manual":
+                        self.lbl_game_detect_status.setText(f"🪟 [지정 창 모드] {info.get('title')} ({info.get('width')}x{info.get('height')}) 단독 공유 중")
+                        self.lbl_game_detect_status.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+                    else:
+                        self.lbl_game_detect_status.setText(
+                            f"🎯 [자동 감지] [{info.get('proc')}] {info.get('title')} ({info.get('width')}x{info.get('height')}) 단독 공유 중"
+                        )
+                        self.lbl_game_detect_status.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
                 else:
                     self.lbl_game_detect_status.setText(
                         "🖥️ 게임 대기 중: The Spike 미실행 (전체 데스크톱 임시 공유 중 - 실행 시 자동 감지)"
@@ -913,6 +976,7 @@ class SpikeLauncher(QMainWindow):
         self.chat_display.addItem(f"[안내] 방이 개설되었습니다! (방 코드: {self.current_room_id})")
         self.chat_display.addItem("[안내] PC 또는 모바일 앱에서 방 목록을 클릭하거나 코드를 입력해 입장할 수 있습니다.")
         self.multi_stacked.setCurrentIndex(1)
+        self.populate_capture_targets()
 
     def join_selected_room(self):
         if not self.is_connected:
@@ -943,6 +1007,7 @@ class SpikeLauncher(QMainWindow):
         self.chat_display.clear()
         self.chat_display.addItem(f"[시스템] 🏠 {room_name} 방에 성공적으로 입장했습니다!")
         self.multi_stacked.setCurrentIndex(1)
+        self.populate_capture_targets()
 
     def on_peer_joined(self, peer_name):
         self.lbl_connection_status.setText(f"상태: 🟢 {peer_name} 접속 완료! 대화가 가능합니다.")
@@ -1087,6 +1152,10 @@ class SpikeLauncher(QMainWindow):
             )
             ok, msg = self.host_runner.start_session()
             if ok:
+                sel_hwnd = self.combo_capture_target.currentData()
+                if sel_hwnd is not None:
+                    self.host_runner.set_target_window(sel_hwnd)
+
                 conn_info = self.host_runner.get_connection_info()
                 host_ip = conn_info.get('host_ip') or get_local_lan_ip()
                 self.signaling.send_host_info(
@@ -1180,6 +1249,47 @@ class SpikeLauncher(QMainWindow):
             self.lbl_status.setText("상태: 스팀 실행 명령 전달됨")
         except Exception as e:
             self.lbl_status.setText(f"상태: 실행 오류 ({e})")
+
+    def populate_capture_targets(self):
+        """현재 열려 있는 캡처 가능한 창 목록을 조회하여 드롭다운에 채웁니다."""
+        try:
+            from src.streaming.screen_streamer import ScreenStreamer
+        except ImportError:
+            from streaming.screen_streamer import ScreenStreamer
+
+        current_val = self.combo_capture_target.currentData()
+
+        self.combo_capture_target.blockSignals(True)
+        self.combo_capture_target.clear()
+
+        windows = ScreenStreamer.list_capturable_windows()
+        for w in windows:
+            self.combo_capture_target.addItem(w["title"], w["hwnd"])
+
+        restored = False
+        if current_val is not None:
+            for i in range(self.combo_capture_target.count()):
+                if self.combo_capture_target.itemData(i) == current_val:
+                    self.combo_capture_target.setCurrentIndex(i)
+                    restored = True
+                    break
+
+        if not restored:
+            self.combo_capture_target.setCurrentIndex(0)
+
+        self.combo_capture_target.blockSignals(False)
+
+    def on_capture_target_changed(self, index):
+        if index < 0:
+            return
+        hwnd = self.combo_capture_target.itemData(index)
+        title = self.combo_capture_target.currentText()
+
+        # 호스트 러너가 이미 실행 중이면 실시간 대상 변경 반영
+        if self.host_runner:
+            self.host_runner.set_target_window(hwnd)
+            self.chat_display.addItem(f"[화면 공유] 대상 변경됨: {title}")
+            self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
     def test_game_window_detection(self):
         """사용자가 직접 The Spike 게임 창이 정상적으로 감지되는지 즉시 테스트합니다."""

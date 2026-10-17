@@ -164,6 +164,19 @@ class HostRunner:
                 fps = int(pkt.get("fps", 120))
                 self.screen_streamer.set_fps(fps)
 
+            # Android 전용 비트마스크 패킷 (터치패드 및 모바일 게임패드) 완벽 호환
+            elif "mask" in pkt:
+                active_xbox_btns = set()
+                if pkt.get("left"): active_xbox_btns.add("DPAD_LEFT")
+                if pkt.get("right"): active_xbox_btns.add("DPAD_RIGHT")
+                if pkt.get("up"): active_xbox_btns.add("DPAD_UP")
+                if pkt.get("down"): active_xbox_btns.add("DPAD_DOWN")
+                if pkt.get("receive"): active_xbox_btns.add("A")
+                if pkt.get("spike"): active_xbox_btns.add("X")
+                if pkt.get("block"): active_xbox_btns.add("Y")
+                if pkt.get("toss"): active_xbox_btns.add("B")
+                self.gamepad_manager.sync_pressed_buttons(active_xbox_btns)
+
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.debug(f"입력 패킷 파싱 오류: {e}")
 

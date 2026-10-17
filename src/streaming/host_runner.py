@@ -1,7 +1,7 @@
 """
 host_runner.py
 호스트(Host) 역할이 확정되었을 때 실행되는 세션 오케스트레이터.
-1. 가상 Xbox 360 2P 패드 생성 (ViGEmBus)
+1. 가상 Xbox 360 2P 패드 생성 (ViGEmBus) - 미설치 시 자동 설치 유도 또는 키보드 폴백으로 무중단 진행
 2. 스팀 게임 자동 실행
 3. 게스트 입력 수신용 UDP 서버 가동 (패킷 유실 복구 및 Watchdog 포함)
 4. 실시간 화면 공유 서버 및 Sunshine 스트리밍 데몬 관리
@@ -36,10 +36,15 @@ def resource_path(relative_path):
 class HostRunner:
     """호스트 세션 전체를 관리하는 컨트롤러."""
 
-    def __init__(self, status_callback=None):
+    def __init__(self, status_callback=None, driver_prompt_callback=None):
+        """
+        :param status_callback: 상태 로그 출력 콜백 (str -> None)
+        :param driver_prompt_callback: ViGEmBus 미설치 시 사용자에게 자동 설치 여부를 묻는 콜백 (() -> bool)
+        """
         self.gamepad_manager = VirtualGamepadManager()
         self.keymap_manager = KeymapManager()
         self.status_callback = status_callback or (lambda msg: None)
+        self.driver_prompt_callback = driver_prompt_callback
         self._input_thread = None
         self._running = False
         self._udp_sock = None
@@ -63,16 +68,41 @@ class HostRunner:
             return "127.0.0.1"
 
     def start_session(self):
-        """호스트 세션을 시작합니다. 순서대로 초기화."""
+        """호스트 세션을 시작합니다. ViGEmBus 미설치 시에도 중단되지 않고 폴백으로 진행합니다."""
         self._running = True
 
-        # 1. 가상 패드 초기화
+        # 1. 가상 패드 초기화 (우선 순수 ViGEmBus 모드 시도)
         self.status_callback("🎮 가상 2P 패드를 준비하는 중...")
-        ok, msg = self.gamepad_manager.initialize()
+        ok, msg = self.gamepad_manager.initialize(allow_fallback=False)
+
         if not ok:
-            self.status_callback(f"❌ 패드 오류: {msg}")
-            return False, msg
-        self.status_callback("✅ 가상 Xbox 360 패드 (2P) 준비 완료")
+            # ViGEmBus 드라이버가 없을 때 사용자에게 원클릭 자동 설치 의사 확인
+            should_install = False
+            if callable(self.driver_prompt_callback):
+                try:
+                    should_install = bool(self.driver_prompt_callback())
+                except Exception:
+                    should_install = False
+
+            if should_install:
+                installed_ok = self.gamepad_manager.try_auto_install_and_reinit(
+                    status_callback=self.status_callback
+                )
+                if installed_ok:
+                    self.status_callback("✅ 가상 Xbox 360 패드 (2P) 준비 완료")
+                else:
+                    self.gamepad_manager.initialize(allow_fallback=True)
+                    self.status_callback(
+                        "⚠️ 가상 패드 드라이버 미적용 → 키보드 시뮬레이션(2P 폴백) 모드로 계속 진행합니다."
+                    )
+            else:
+                # 설치를 건너뛰더라도 세션을 중단하지 않고 키보드 폴백 활성화
+                self.gamepad_manager.initialize(allow_fallback=True)
+                self.status_callback(
+                    "ℹ️ ViGEmBus 미설치 → 키보드 시뮬레이션(2P 폴백) 모드로 전환하여 세션을 계속 시작합니다."
+                )
+        else:
+            self.status_callback("✅ 가상 Xbox 360 패드 (2P) 준비 완료")
 
         # 2. UDP 입력 수신 서버 시작
         self.status_callback("📡 입력 수신 서버를 시작하는 중...")
@@ -136,7 +166,7 @@ class HostRunner:
         self._input_thread.start()
 
     def _process_input_packet(self, raw_data):
-        """게스트 입력 UDP 패킷을 파싱하여 가상 패드에 주입."""
+        """게스트 입력 UDP 패킷을 파싱하여 가상 패드(또는 키보드 폴백)에 주입."""
         try:
             pkt = json.loads(raw_data.decode('utf-8'))
             pkt_type = pkt.get("type")
@@ -205,6 +235,7 @@ class HostRunner:
             "input_port": self.input_port,
             "stream_port": self.stream_port,
             "sunshine_available": self._sunshine_proc is not None,
+            "fallback_mode": self.gamepad_manager.fallback_mode,
         }
 
     def stop_session(self):

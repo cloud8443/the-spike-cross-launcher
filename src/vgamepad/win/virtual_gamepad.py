@@ -66,8 +66,12 @@ class VGamepad(ABC):
         assert vcli.vigem_target_is_attached(self._devicep), "The virtual device could not connect to ViGEmBus."
 
     def __del__(self):
-        vcli.vigem_target_remove(self._busp, self._devicep)
-        vcli.vigem_target_free(self._devicep)
+        if hasattr(self, '_busp') and hasattr(self, '_devicep') and self._busp and self._devicep:
+            try:
+                vcli.vigem_target_remove(self._busp, self._devicep)
+                vcli.vigem_target_free(self._devicep)
+            except Exception:
+                pass
 
     def get_vid(self):
         """

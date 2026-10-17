@@ -2,15 +2,27 @@
 virtual_controller.py
 호스트 PC에서 ViGEmBus 가상 Xbox 360 패드를 생성하고,
 게스트 입력 패킷을 2P 컨트롤러에 실시간 주입하는 모듈.
+- ViGEmBus 미설치 시 공식 드라이버 원클릭 자동 다운로드/설치 지원
+- 드라이버 설치 불가/거부 시에도 세션이 중단되지 않도록 Win32 Hardware ScanCode(DirectInput) 키보드 폴백 지원
 """
 
+import ctypes
+from ctypes import wintypes
 import json
+import logging
 import os
 import sys
-import logging
+import tempfile
 import threading
+import time
+import urllib.request
 
 logger = logging.getLogger("VirtualController")
+
+VIGEMBUS_INSTALLER_URL = (
+    "https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/"
+    "ViGEmBus_1.22.0_x64_x86_arm64.exe"
+)
 
 
 def resource_path(relative_path):
@@ -32,13 +44,138 @@ ACTION_TO_XBOX = {
     "PAUSE":         "START",
 }
 
-# 방향키 등 보조 기본 키 매핑 (사용자가 다른 액션에 할당하지 않았을 경우 자동 동작)
 FALLBACK_KEY_TO_XBOX = {
     "UP":    "DPAD_UP",
     "DOWN":  "DPAD_DOWN",
     "LEFT":  "DPAD_LEFT",
     "RIGHT": "DPAD_RIGHT",
 }
+
+
+class ViGEmBusInstaller:
+    """ViGEmBus 드라이버 자동 다운로드 및 설치 헬퍼."""
+
+    @staticmethod
+    def download_and_install(status_callback=None) -> bool:
+        """
+        공식 ViGEmBus 설치 파일을 다운로드하고 관리자 권한(runas)으로 실행합니다.
+        설치 프로세스가 종료될 때까지 대기 후 성공 여부를 반환합니다.
+        """
+        if sys.platform != "win32":
+            return False
+
+        cb = status_callback or (lambda msg: None)
+        try:
+            # 1. 번들된 로컬 설치 파일이 있는지 먼저 확인
+            bundled_path = resource_path(os.path.join("tools", "ViGEmBus_Setup.exe"))
+            if os.path.exists(bundled_path):
+                installer_path = bundled_path
+            else:
+                installer_path = os.path.join(tempfile.gettempdir(), "ViGEmBus_1.22.0_Setup.exe")
+                if not os.path.exists(installer_path) or os.path.getsize(installer_path) < 1_000_000:
+                    cb("📥 ViGEmBus 공식 드라이버를 다운로드하는 중...")
+                    urllib.request.urlretrieve(VIGEMBUS_INSTALLER_URL, installer_path)
+
+            cb("🛡️ 관리자 권한으로 ViGEmBus 드라이버 설치를 시작합니다. (권한 승인 창이 뜨면 '예'를 눌러주세요)")
+
+            # ShellExecuteExW를 사용하여 관리자 권한(runas) 실행 및 프로세스 종료 대기
+            SEE_MASK_NOCLOSEPROCESS = 0x00000040
+            SW_SHOWNORMAL = 1
+
+            class SHELLEXECUTEINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("fMask", wintypes.ULONG),
+                    ("hwnd", wintypes.HWND),
+                    ("lpVerb", wintypes.LPCWSTR),
+                    ("lpFile", wintypes.LPCWSTR),
+                    ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR),
+                    ("nShow", ctypes.c_int),
+                    ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", wintypes.LPCWSTR),
+                    ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD),
+                    ("hIconOrMonitor", wintypes.HANDLE),
+                    ("hProcess", wintypes.HANDLE),
+                ]
+
+            sei = SHELLEXECUTEINFO()
+            sei.cbSize = ctypes.sizeof(sei)
+            sei.fMask = SEE_MASK_NOCLOSEPROCESS
+            sei.lpVerb = "runas"
+            sei.lpFile = installer_path
+            sei.lpParameters = "/passive /norestart"
+            sei.nShow = SW_SHOWNORMAL
+
+            if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
+                cb("⚠️ 드라이버 설치 권한 요청이 취소되었거나 실패했습니다.")
+                return False
+
+            if sei.hProcess:
+                INFINITE = 0xFFFFFFFF
+                ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, INFINITE)
+                ctypes.windll.kernel32.CloseHandle(sei.hProcess)
+
+            # 드라이버 버스 서비스가 올라올 시간을 잠시 대기
+            time.sleep(1.5)
+            cb("✅ ViGEmBus 드라이버 설치 프로세스가 완료되었습니다.")
+            return True
+
+        except Exception as e:
+            logger.warning(f"ViGEmBus 자동 설치 중 오류: {e}")
+            cb(f"⚠️ 자동 설치 오류: {e}")
+            return False
+
+
+class Win32KeyboardFallback:
+    """
+    ViGEmBus 드라이버가 없을 때 Windows SendInput(DirectInput 하드웨어 스캔코드)을 통해
+    Xbox 버튼 입력을 2P 키보드 키로 에뮬레이션하는 폴백 엔진.
+    """
+
+    # DirectInput / 게임 엔진 호환 하드웨어 스캔코드 및 Virtual-Key 매핑
+    # (VK, ScanCode, IsExtendedKey)
+    XBOX_TO_KEYCODE = {
+        "DPAD_UP":    (0x26, 0x48, True),   # Up Arrow
+        "DPAD_DOWN":  (0x28, 0x50, True),   # Down Arrow
+        "DPAD_LEFT":  (0x25, 0x4B, True),   # Left Arrow
+        "DPAD_RIGHT": (0x27, 0x4D, True),   # Right Arrow
+        "A":          (0x4B, 0x25, False),  # 'K' (리시브 / 슬라이딩)
+        "X":          (0x4C, 0x26, False),  # 'L' (점프 / 스파이크)
+        "Y":          (0x49, 0x17, False),  # 'I' (블로킹)
+        "B":          (0x4A, 0x24, False),  # 'J' (특수기 / 토스)
+        "START":      (0x1B, 0x01, False),  # Escape (일시정지)
+    }
+
+    def __init__(self):
+        self._supported = (sys.platform == "win32")
+
+    def send_button(self, xbox_button_name: str, is_pressed: bool):
+        if not self._supported:
+            return
+        mapping = self.XBOX_TO_KEYCODE.get(xbox_button_name)
+        if not mapping:
+            return
+        vk, scan, is_ext = mapping
+        self._send_key_scancode(vk, scan, is_ext, is_pressed)
+
+    def _send_key_scancode(self, vk: int, scan: int, is_extended: bool, is_pressed: bool):
+        try:
+            KEYEVENTF_EXTENDEDKEY = 0x0001
+            KEYEVENTF_KEYUP = 0x0002
+            KEYEVENTF_SCANCODE = 0x0008
+
+            flags = KEYEVENTF_SCANCODE
+            if is_extended:
+                flags |= KEYEVENTF_EXTENDEDKEY
+            if not is_pressed:
+                flags |= KEYEVENTF_KEYUP
+
+            ctypes.windll.user32.keybd_event(vk, scan, flags, 0)
+        except Exception as e:
+            logger.debug(f"Win32 키보드 폴백 입력 오류: {e}")
 
 
 class KeymapManager:
@@ -123,7 +260,10 @@ class KeymapManager:
 
 
 class VirtualGamepadManager:
-    """ViGEmBus 가상 Xbox 360 패드를 스레드 안전하게 관리."""
+    """
+    ViGEmBus 가상 Xbox 360 패드를 스레드 안전하게 관리하며,
+    ViGEmBus 미설치 시 Win32 키보드 에뮬레이션 모드로 자동 폴백합니다.
+    """
 
     def __init__(self):
         self.gamepad = None
@@ -131,9 +271,15 @@ class VirtualGamepadManager:
         self._button_map = {}
         self._pressed_buttons = set()
         self._lock = threading.Lock()
+        self.fallback_mode = False
+        self._kb_fallback = Win32KeyboardFallback()
 
-    def initialize(self):
-        """가상 Xbox 360 컨트롤러를 생성. (성공여부, 메시지) 튜플 반환."""
+    def initialize(self, allow_fallback=True):
+        """
+        가상 Xbox 360 컨트롤러를 생성.
+        반환값: (성공여부: bool, 메시지: str)
+        allow_fallback=True 인 경우 ViGEmBus가 없어도 키보드 폴백 모드로 활성화하여 True를 반환.
+        """
         try:
             import vgamepad as vg
             self._vgamepad = vg
@@ -152,26 +298,58 @@ class VirtualGamepadManager:
                 "LB":         vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
                 "RB":         vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
             }
+            self.fallback_mode = False
             self._pressed_buttons.clear()
             logger.info("ViGEmBus 가상 Xbox 360 패드 생성 완료")
-            return True, "가상 Xbox 360 패드가 정상적으로 생성되었습니다."
-        except ImportError:
-            return False, ("vgamepad 패키지가 설치되지 않았습니다.\n"
-                           "pip install vgamepad 으로 설치해주세요.")
+            return True, "가상 Xbox 360 패드(ViGEmBus)가 정상적으로 생성되었습니다."
+
         except Exception as e:
-            return False, (f"ViGEmBus 드라이버 오류: {e}\n"
-                           "ViGEmBus 드라이버가 설치되어 있는지 확인해주세요.\n"
-                           "https://github.com/nefarius/ViGEmBus/releases")
+            logger.warning(f"ViGEmBus 초기화 실패 ({e})")
+            if allow_fallback:
+                self.gamepad = None
+                self.fallback_mode = True
+                self._pressed_buttons.clear()
+                return True, (
+                    f"ViGEmBus 드라이버 미감지 ({e}) → "
+                    "키보드 시뮬레이션(DirectInput 폴백) 모드로 동작합니다."
+                )
+            return False, (
+                f"ViGEmBus 드라이버 오류: {e}\n"
+                "ViGEmBus 드라이버가 설치되어 있는지 확인해주세요.\n"
+                "https://github.com/nefarius/ViGEmBus/releases"
+            )
+
+    def try_auto_install_and_reinit(self, status_callback=None) -> bool:
+        """ViGEmBus 자동 설치 후 가상 패드 재생성을 시도합니다."""
+        installed = ViGEmBusInstaller.download_and_install(status_callback=status_callback)
+        if installed:
+            ok, _ = self.initialize(allow_fallback=False)
+            if ok:
+                return True
+        return False
 
     def update_input(self, xbox_button_name, is_pressed):
-        """Xbox 버튼 이름(문자열)으로 가상 패드 입력을 갱신."""
-        btn = self._button_map.get(xbox_button_name)
-        if btn is None:
-            return
-
+        """Xbox 버튼 이름(문자열)으로 가상 패드 또는 폴백 키보드 입력을 갱신."""
         with self._lock:
+            if self.fallback_mode:
+                if is_pressed:
+                    if xbox_button_name in self._pressed_buttons:
+                        return
+                    self._pressed_buttons.add(xbox_button_name)
+                    self._kb_fallback.send_button(xbox_button_name, True)
+                else:
+                    if xbox_button_name not in self._pressed_buttons:
+                        return
+                    self._pressed_buttons.discard(xbox_button_name)
+                    self._kb_fallback.send_button(xbox_button_name, False)
+                return
+
             if not self.gamepad:
                 return
+            btn = self._button_map.get(xbox_button_name)
+            if btn is None:
+                return
+
             if is_pressed:
                 if xbox_button_name in self._pressed_buttons:
                     return
@@ -185,13 +363,23 @@ class VirtualGamepadManager:
             self.gamepad.update()
 
     def sync_pressed_buttons(self, active_button_names: set):
-        """게스트의 현재 눌린 버튼 집합과 호스트 패드 상태를 동기화 (패킷 유실 복구)."""
+        """게스트의 현재 눌린 버튼 집합과 호스트 패드/키보드 상태를 동기화 (패킷 유실 복구)."""
         with self._lock:
+            if self.fallback_mode:
+                for btn_name in list(self._pressed_buttons):
+                    if btn_name not in active_button_names:
+                        self._kb_fallback.send_button(btn_name, False)
+                        self._pressed_buttons.discard(btn_name)
+                for btn_name in active_button_names:
+                    if btn_name not in self._pressed_buttons:
+                        self._kb_fallback.send_button(btn_name, True)
+                        self._pressed_buttons.add(btn_name)
+                return
+
             if not self.gamepad:
                 return
             changed = False
 
-            # 게스트에서는 뗐는데 호스트에 눌려있는 버튼 해제
             for btn_name in list(self._pressed_buttons):
                 if btn_name not in active_button_names:
                     btn = self._button_map.get(btn_name)
@@ -200,7 +388,6 @@ class VirtualGamepadManager:
                         changed = True
                     self._pressed_buttons.discard(btn_name)
 
-            # 게스트에서 눌렸는데 호스트에 안 눌려있는 버튼 입력
             for btn_name in active_button_names:
                 if btn_name not in self._pressed_buttons:
                     btn = self._button_map.get(btn_name)
@@ -215,6 +402,12 @@ class VirtualGamepadManager:
     def release_all(self):
         """모든 버튼을 릴리즈 (중립 상태로 복귀)."""
         with self._lock:
+            if self.fallback_mode:
+                for btn_name in list(self._pressed_buttons):
+                    self._kb_fallback.send_button(btn_name, False)
+                self._pressed_buttons.clear()
+                return
+
             if self.gamepad and self._pressed_buttons:
                 self._pressed_buttons.clear()
                 self.gamepad.reset()
@@ -223,6 +416,13 @@ class VirtualGamepadManager:
     def cleanup(self):
         """가상 패드를 제거하고 리소스를 해제."""
         with self._lock:
+            if self.fallback_mode:
+                for btn_name in list(self._pressed_buttons):
+                    self._kb_fallback.send_button(btn_name, False)
+                self._pressed_buttons.clear()
+                self.fallback_mode = False
+                return
+
             if self.gamepad:
                 try:
                     self._pressed_buttons.clear()

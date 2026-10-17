@@ -19,14 +19,14 @@ if _src_dir not in sys.path:
 try:
     from src.streaming.host_runner import HostRunner
     from src.streaming.guest_runner import GuestRunner
-    from src.streaming.virtual_controller import KeymapManager
+    from src.streaming.virtual_controller import KeymapManager, ViGEmBusInstaller
     from src.ui.keymap_dialog import KeymapDialog
     from src.network.signaling import SignalingHandler
     from src.streaming.screen_viewer import GameStreamViewerWindow
 except ImportError:
     from streaming.host_runner import HostRunner
     from streaming.guest_runner import GuestRunner
-    from streaming.virtual_controller import KeymapManager
+    from streaming.virtual_controller import KeymapManager, ViGEmBusInstaller
     from ui.keymap_dialog import KeymapDialog
     from network.signaling import SignalingHandler
     from streaming.screen_viewer import GameStreamViewerWindow
@@ -623,6 +623,12 @@ class SpikeLauncher(QMainWindow):
         self.btn_reconnect.clicked.connect(self.reconnect_with_new_settings)
         fb_layout.addWidget(self.btn_reconnect)
 
+        self.btn_install_vigem = QPushButton("🎮 가상 2P 패드 드라이버 (ViGEmBus) 원클릭 설치")
+        self.btn_install_vigem.setProperty("class", "SuccessButton")
+        self.btn_install_vigem.setFixedHeight(40)
+        self.btn_install_vigem.clicked.connect(self.install_vigembus_driver_manual)
+        fb_layout.addWidget(self.btn_install_vigem)
+
         settings_layout.addWidget(form_box)
         settings_layout.addStretch()
 
@@ -975,6 +981,33 @@ class SpikeLauncher(QMainWindow):
             'host_ip': get_local_lan_ip()
         })
 
+    def prompt_vigembus_install(self) -> bool:
+        """ViGEmBus 미설치 시 사용자에게 원클릭 설치 여부를 물어봅니다."""
+        reply = QMessageBox.question(
+            self,
+            "가상 2P 패드 드라이버(ViGEmBus) 설치 안내",
+            "호스트 PC에 가상 Xbox 360 컨트롤러 드라이버(ViGEmBus)가 설치되어 있지 않습니다.\n\n"
+            "• [예(Yes)] 클릭 시: 공식 드라이버를 자동으로 다운로드 및 설치합니다. (권장)\n"
+            "• [아니오(No)] 클릭 시: 설치 없이 '키보드 시뮬레이션(2P 폴백) 모드'로 즉시 시작합니다.\n\n"
+            "지금 ViGEmBus 드라이버를 자동 설치하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def install_vigembus_driver_manual(self):
+        """설정 탭에서 수동으로 ViGEmBus 원클릭 설치를 실행."""
+        ok = ViGEmBusInstaller.download_and_install()
+        if ok:
+            QMessageBox.information(self, "설치 완료", "ViGEmBus 가상 패드 드라이버 설치가 완료되었습니다!")
+        else:
+            QMessageBox.warning(
+                self,
+                "설치 안내",
+                "자동 설치가 취소되었거나 실패했습니다.\n"
+                "호스트 시작 시 키보드 폴백 모드로는 계속 플레이할 수 있습니다."
+            )
+
     def on_session_started(self, data):
         role = data.get('role')
         host_name = data.get('host', '호스트')
@@ -993,7 +1026,10 @@ class SpikeLauncher(QMainWindow):
                 self.chat_display.addItem(f"[호스트] {text}")
                 self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
-            self.host_runner = HostRunner(status_callback=host_status_cb)
+            self.host_runner = HostRunner(
+                status_callback=host_status_cb,
+                driver_prompt_callback=self.prompt_vigembus_install
+            )
             ok, msg = self.host_runner.start_session()
             if ok:
                 conn_info = self.host_runner.get_connection_info()

@@ -12,12 +12,22 @@ venv/
 build/
 dist/
 *.exe
+*.apk
 *.spec
 *.zip
 프로토/
 frontend/node_modules/
 frontend/dist/
 node_modules/
+
+# Android
+.gradle/
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
+*.ap_
+*.aab
 
 # IDE / OS
 .vscode/

@@ -78,6 +78,20 @@ async def handle_client(reader, writer):
     addr = writer.get_extra_info('peername')
     peer_ip = addr[0] if addr else "127.0.0.1"
 
+    sock = writer.get_extra_info('socket')
+    if sock:
+        try:
+            import socket
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, 'TCP_KEEPIDLE'):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            if hasattr(socket, 'TCP_KEEPINTVL'):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, 'TCP_KEEPCNT'):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except Exception:
+            pass
+
     connected_clients[client_id] = {
         'writer': writer,
         'name': client_name,

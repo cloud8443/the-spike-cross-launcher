@@ -5,6 +5,7 @@ import PyQt6.sip
 import traceback
 import json
 import socket
+import subprocess
 import threading
 import webbrowser
 
@@ -70,7 +71,9 @@ from PyQt6.QtGui import QFont, QColor
 DEFAULT_SERVER_HOST = "146.56.101.107"
 DEFAULT_SERVER_PORT = 5555
 
+
 def get_local_lan_ip():
+    """실제 라우팅 가능한 로컬 Wi-Fi / 이더넷 사설 IP를 최우선으로 반환합니다."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.5)
@@ -81,8 +84,34 @@ def get_local_lan_ip():
     except Exception:
         return "127.0.0.1"
 
+
+def ensure_firewall_ports_open():
+    """호스트 스트리밍(TCP 47998) 및 입력 수신(UDP 47990) 방화벽 인바운드 규칙을 비동기로 등록 시도합니다."""
+    if sys.platform != "win32":
+        return
+
+    def _worker():
+        cmds = [
+            'netsh advfirewall firewall add rule name="TheSpikeCross_Stream_TCP" dir=in action=allow protocol=TCP localport=47998',
+            'netsh advfirewall firewall add rule name="TheSpikeCross_Input_UDP" dir=in action=allow protocol=UDP localport=47990',
+        ]
+        for cmd in cmds:
+            try:
+                subprocess.run(
+                    cmd,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                )
+            except Exception:
+                pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 # -------------------------------------------------------------
-# 최고급 모던 게이밍 다크 QSS 스타일시트
+# 최고급 모던 게이밍 다크 QSS 스타일시트 (QMessageBox / QDialog 가독성 완벽 패치)
 # -------------------------------------------------------------
 MODERN_STYLE_SHEET = """
 QMainWindow {
@@ -92,6 +121,43 @@ QMainWindow {
 QWidget {
     font-family: 'Pretendard', 'Malgun Gothic', 'Segoe UI', sans-serif;
     color: #e2e8f0;
+}
+
+/* 대화상자 및 메시지 박스 (흰 배경에 흰 글자 버그 완벽 해결) */
+QDialog, QMessageBox {
+    background-color: #141726;
+    color: #f8fafc;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+QMessageBox QLabel, QDialog QLabel {
+    background-color: transparent;
+    color: #f8fafc;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.5;
+}
+
+QMessageBox QPushButton, QDialog QPushButton {
+    background-color: #1e293b;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 700;
+    border: 1px solid #38bdf8;
+    border-radius: 8px;
+    padding: 6px 18px;
+    min-width: 80px;
+    min-height: 32px;
+}
+
+QMessageBox QPushButton:hover, QDialog QPushButton:hover {
+    background-color: #0284c7;
+    color: #ffffff;
+    border: 1px solid #7dd3fc;
+}
+
+QMessageBox QPushButton:pressed, QDialog QPushButton:pressed {
+    background-color: #0369a1;
 }
 
 /* 사이드바 */
@@ -307,6 +373,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 }
 """
 
+
 class NetworkSignalEmitter(QObject):
     connected = pyqtSignal()
     disconnected = pyqtSignal()
@@ -322,6 +389,7 @@ class NetworkSignalEmitter(QObject):
     room_ready_for_host = pyqtSignal(dict)
     session_started = pyqtSignal(dict)
     signal_exchanged = pyqtSignal(dict)
+
 
 class SpikeLauncher(QMainWindow):
     def __init__(self):
@@ -360,6 +428,16 @@ class SpikeLauncher(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.auto_refresh_tick)
         self.refresh_timer.start(2500)
+
+    def _create_styled_msgbox(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok):
+        """언제나 선명한 다크 테마와 흰색 글씨를 보장하는 QMessageBox 생성 헬퍼."""
+        box = QMessageBox(self)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(buttons)
+        box.setStyleSheet(MODERN_STYLE_SHEET)
+        return box
 
     def init_ui(self):
         self.setStyleSheet(MODERN_STYLE_SHEET)
@@ -713,7 +791,7 @@ class SpikeLauncher(QMainWindow):
         fb_layout.addWidget(self.btn_install_vigem)
 
         self.btn_detect_test = QPushButton("🎯 게임 화면 감지 진단 테스트")
-        self.btn_detect_test.setProperty("class", "SecondaryButton")
+        self.btn_detect_test.setProperty("class", "PrimaryButton")
         self.btn_detect_test.setFixedHeight(40)
         self.btn_detect_test.clicked.connect(self.test_game_window_detection)
         fb_layout.addWidget(self.btn_detect_test)
@@ -792,7 +870,9 @@ class SpikeLauncher(QMainWindow):
         self.signals.peer_left.connect(self.on_peer_left)
         self.signals.room_closed.connect(self.on_room_closed)
         self.signals.chat_received.connect(self.on_chat_received)
-        self.signals.error_received.connect(lambda msg: QMessageBox.warning(self, "안내", msg))
+        self.signals.error_received.connect(
+            lambda msg: self._create_styled_msgbox(QMessageBox.Icon.Warning, "안내", msg).exec()
+        )
         # 스트리밍 멀티플레이 시그널
         self.signals.room_ready_for_host.connect(self.on_room_ready_for_host)
         self.signals.session_started.connect(self.on_session_started)
@@ -914,7 +994,6 @@ class SpikeLauncher(QMainWindow):
     def update_room_list_ui(self, rooms, online_count):
         self.lbl_sidebar_online_count.setText(f"접속자: {online_count}명")
 
-        # 현재 선택되어 있던 방 ID 보존
         selected_room_id = None
         curr_item = self.room_list_widget.currentItem()
         if curr_item:
@@ -949,7 +1028,7 @@ class SpikeLauncher(QMainWindow):
 
     def create_room(self):
         if not self.is_connected:
-            QMessageBox.warning(self, "서버 오류", "서버에 연결되어 있지 않습니다.")
+            self._create_styled_msgbox(QMessageBox.Icon.Warning, "서버 오류", "서버에 연결되어 있지 않습니다.").exec()
             return
 
         room_name = self.input_room_name.text().strip()
@@ -980,12 +1059,12 @@ class SpikeLauncher(QMainWindow):
 
     def join_selected_room(self):
         if not self.is_connected:
-            QMessageBox.warning(self, "연결 오류", "서버에 연결되어 있지 않습니다.")
+            self._create_styled_msgbox(QMessageBox.Icon.Warning, "연결 오류", "서버에 연결되어 있지 않습니다.").exec()
             return
 
         current_item = self.room_list_widget.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "선택 오류", "입장할 방을 목록에서 선택해주세요.")
+            self._create_styled_msgbox(QMessageBox.Icon.Warning, "선택 오류", "입장할 방을 목록에서 선택해주세요.").exec()
             return
 
         room_id = current_item.data(Qt.ItemDataRole.UserRole)
@@ -1052,7 +1131,7 @@ class SpikeLauncher(QMainWindow):
 
     def on_room_closed(self, reason):
         self.cleanup_streaming()
-        QMessageBox.information(self, "퇴장 안내", reason)
+        self._create_styled_msgbox(QMessageBox.Icon.Information, "퇴장 안내", reason).exec()
         self.current_room_id = None
         self.my_role = None
         self.multi_stacked.setCurrentIndex(0)
@@ -1093,6 +1172,7 @@ class SpikeLauncher(QMainWindow):
     def claim_host(self):
         if not self.current_room_id:
             return
+        ensure_firewall_ports_open()
         self.btn_claim_host.setEnabled(False)
         self.btn_claim_host.setText("⏳ 호스트 환경 준비 요청 중...")
         self.send_json({
@@ -1102,31 +1182,36 @@ class SpikeLauncher(QMainWindow):
         })
 
     def prompt_vigembus_install(self) -> bool:
-        """ViGEmBus 미설치 시 사용자에게 원클릭 설치 여부를 물어봅니다."""
-        reply = QMessageBox.question(
-            self,
+        """ViGEmBus 미설치 시 사용자에게 선명한 다크 테마 대화상자로 원클릭 설치 여부를 물어봅니다."""
+        box = self._create_styled_msgbox(
+            QMessageBox.Icon.Question,
             "가상 2P 패드 드라이버(ViGEmBus) 설치 안내",
             "호스트 PC에 가상 Xbox 360 컨트롤러 드라이버(ViGEmBus)가 설치되어 있지 않습니다.\n\n"
             "• [예(Yes)] 클릭 시: 공식 드라이버를 자동으로 다운로드 및 설치합니다. (권장)\n"
             "• [아니오(No)] 클릭 시: 설치 없이 '키보드 시뮬레이션(2P 폴백) 모드'로 즉시 시작합니다.\n\n"
             "지금 ViGEmBus 드라이버를 자동 설치하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        reply = box.exec()
         return reply == QMessageBox.StandardButton.Yes
 
     def install_vigembus_driver_manual(self):
         """설정 탭에서 수동으로 ViGEmBus 원클릭 설치를 실행."""
         ok = ViGEmBusInstaller.download_and_install()
         if ok:
-            QMessageBox.information(self, "설치 완료", "ViGEmBus 가상 패드 드라이버 설치가 완료되었습니다!")
+            self._create_styled_msgbox(
+                QMessageBox.Icon.Information,
+                "설치 완료",
+                "ViGEmBus 가상 패드 드라이버 설치가 완료되었습니다!"
+            ).exec()
         else:
-            QMessageBox.warning(
-                self,
+            self._create_styled_msgbox(
+                QMessageBox.Icon.Warning,
                 "설치 안내",
                 "자동 설치가 취소되었거나 실패했습니다.\n"
                 "호스트 시작 시 키보드 폴백 모드로는 계속 플레이할 수 있습니다."
-            )
+            ).exec()
 
     def on_session_started(self, data):
         role = data.get('role')
@@ -1136,6 +1221,7 @@ class SpikeLauncher(QMainWindow):
         self.lbl_streaming_status.setVisible(True)
 
         if role == 'streaming_host':
+            ensure_firewall_ports_open()
             self.streaming_role = 'streaming_host'
             self.lbl_streaming_status.setText(f"👑 내가 호스트입니다 (게스트: {guest_name})")
             self.lbl_streaming_status.setStyleSheet("color: #f59e0b; font-size: 13px; font-weight: bold;")
@@ -1164,7 +1250,8 @@ class SpikeLauncher(QMainWindow):
                     conn_info['input_port'],
                     conn_info.get('stream_port', 47998)
                 )
-                self.chat_display.addItem(f"[안내] 게스트에게 화면 공유 및 연결 정보({host_ip})를 전송했습니다.")
+                self.chat_display.addItem(f"[안내] 게스트에게 화면 공유 및 연결 정보({host_ip}:47998)를 전송했습니다.")
+                self.chat_display.addItem("[팁] 모바일 연결 시 호스트 PC와 동일한 Wi-Fi(공유기)에 연결되어 있어야 초저지연 스트리밍이 작동합니다.")
             else:
                 self.chat_display.addItem(f"[오류] 호스트 시작 실패: {msg}")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
@@ -1194,7 +1281,6 @@ class SpikeLauncher(QMainWindow):
             if ok:
                 self.chat_display.addItem("[안내] 2P 키보드 입력이 호스트로 실시간 전송됩니다!")
 
-            # 실시간 게임 화면 공유 뷰어 창 팝업!
             if self.viewer_window:
                 try:
                     self.viewer_window.close()
@@ -1285,7 +1371,6 @@ class SpikeLauncher(QMainWindow):
         hwnd = self.combo_capture_target.itemData(index)
         title = self.combo_capture_target.currentText()
 
-        # 호스트 러너가 이미 실행 중이면 실시간 대상 변경 반영
         if self.host_runner:
             self.host_runner.set_target_window(hwnd)
             self.chat_display.addItem(f"[화면 공유] 대상 변경됨: {title}")
@@ -1301,8 +1386,8 @@ class SpikeLauncher(QMainWindow):
         streamer = ScreenStreamer()
         detected, info = streamer.get_detection_status()
         if detected and info:
-            QMessageBox.information(
-                self,
+            self._create_styled_msgbox(
+                QMessageBox.Icon.Information,
                 "게임 창 감지 성공",
                 f"🎉 The Spike 게임 창이 성공적으로 감지되었습니다!\n\n"
                 f"• 프로세스명: {info.get('proc')}\n"
@@ -1310,10 +1395,10 @@ class SpikeLauncher(QMainWindow):
                 f"• 창 해상도:  {info.get('width')} x {info.get('height')}\n"
                 f"• 윈도우 HWND: {info.get('hwnd')}\n\n"
                 f"✅ 호스트 세션 진행 시 게스트에게 The Spike 게임 화면만 선명하게 단독 공유됩니다!"
-            )
+            ).exec()
         else:
-            QMessageBox.information(
-                self,
+            self._create_styled_msgbox(
+                QMessageBox.Icon.Information,
                 "게임 창 미감지 안내",
                 "ℹ️ 현재 실행 중인 'The Spike' 게임 창이 감지되지 않았습니다.\n\n"
                 "• 이유 1: 아직 게임(스팀)을 실행하지 않았습니다.\n"
@@ -1322,7 +1407,7 @@ class SpikeLauncher(QMainWindow):
                 "게임이 아직 실행되지 않은 상태에서 호스트를 시작하더라도,\n"
                 "1) 먼저 전체 데스크톱 화면이 안전하게 공유되고\n"
                 "2) 게임을 실행하는 즉시 The Spike 게임 화면으로 1초 만에 자동 전환됩니다!"
-            )
+            ).exec()
 
     def reconnect_with_new_settings(self):
         new_host = self.input_server_host.text().strip()
@@ -1338,9 +1423,17 @@ class SpikeLauncher(QMainWindow):
                     pass
             self.is_connected = False
             self.connect_to_server()
-            QMessageBox.information(self, "설정 완료", f"서버 주소가 {new_host}:{new_port}로 변경되었습니다.")
+            self._create_styled_msgbox(
+                QMessageBox.Icon.Information,
+                "설정 완료",
+                f"서버 주소가 {new_host}:{new_port}로 변경되었습니다."
+            ).exec()
         except ValueError:
-            QMessageBox.warning(self, "입력 오류", "포트 번호는 숫자여야 합니다.")
+            self._create_styled_msgbox(
+                QMessageBox.Icon.Warning,
+                "입력 오류",
+                "포트 번호는 숫자여야 합니다."
+            ).exec()
 
     def closeEvent(self, event):
         self.is_running = False
@@ -1355,14 +1448,36 @@ class SpikeLauncher(QMainWindow):
             pass
         event.accept()
 
+
 if __name__ == '__main__':
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ERROR_ALREADY_EXISTS = 183
+            _instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "TheSpikeCrossLauncher_SingleInstance_Mutex")
+            if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+                try:
+                    import win32gui
+                    import win32con
+                    hwnd = win32gui.FindWindowW(None, "The Spike Cross - Stable Multiplayer")
+                    if hwnd:
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                sys.exit(0)
+        except Exception:
+            pass
+
     try:
         app = QApplication(sys.argv)
         app.setStyle('Fusion')
+        app.setStyleSheet(MODERN_STYLE_SHEET)
         window = SpikeLauncher()
         window.show()
         sys.exit(app.exec())
     except Exception:
         app = QApplication(sys.argv) if not QApplication.instance() else QApplication.instance()
+        app.setStyleSheet(MODERN_STYLE_SHEET)
         QMessageBox.critical(None, "실행 오류 발생", f"다음 에러로 인해 프로그램이 종료됩니다:\n\n{traceback.format_exc()}")
         sys.exit(1)

@@ -40,4 +40,6 @@ Desktop.ini
 *.key
 *.pem
 *.id_rsa
-.env
+*.env
+scratch/
+

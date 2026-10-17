@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +48,7 @@ fun GameViewerScreen(
 
     val fps by streamReceiver.fps.collectAsState()
     val isStreaming by streamReceiver.isStreaming.collectAsState()
+    val statusMessage by streamReceiver.statusMessage.collectAsState()
     var showTouchControls by remember { mutableStateOf(true) }
 
     DisposableEffect(hostIp) {
@@ -65,7 +67,60 @@ fun GameViewerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. 상단 HUD 상태 표시줄 (FPS, 호스트 IP, 터치패드 토글, 나가기)
+        // 2. 스트림 미수신 시 중앙 연결 상태 진단 & 안내 카드 표시
+        if (!isStreaming) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .widthIn(max = 420.dp)
+                    .background(Color(0xDD141726), RoundedCornerShape(16.dp))
+                    .border(1.dp, Color(0x6638BDF8), RoundedCornerShape(16.dp))
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = Color(0xFF38BDF8),
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(36.dp)
+                    )
+                    Text(
+                        text = "호스트 게임 화면 연결 중",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = statusMessage,
+                        color = Color(0xFF94A3B8),
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = "💡 확인사항: 모바일(Wi-Fi)과 호스트 PC($hostIp)가 동일한 공유기 네트워크에 연결되어 있어야 합니다.",
+                        color = Color(0xFFFFCA28),
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = { streamReceiver.reconnectNow() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
+                        ) {
+                            Text("즉시 재연결", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(onClick = onExitGame) {
+                            Text("대기실로 나가기", color = Color(0xFFFF5252), fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. 상단 HUD 상태 표시줄 (FPS, 호스트 IP, 터치패드 토글, 나가기)
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -77,12 +132,12 @@ fun GameViewerScreen(
         ) {
             Text(
                 text = if (isStreaming) "● $fps FPS" else "○ 스트림 연결 중...",
-                color = if (fps >= 60) Color(0xFF4CAF50) else Color(0xFFFFB300),
+                color = if (isStreaming && fps >= 30) Color(0xFF4CAF50) else Color(0xFFFFB300),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold
             )
             Text(text = "HOST: $hostIp", color = Color.LightGray, fontSize = 12.sp)
-            
+
             TextButton(
                 onClick = { showTouchControls = !showTouchControls },
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
@@ -104,14 +159,13 @@ fun GameViewerScreen(
             }
         }
 
-        // 3. 멀티터치 가상 컨트롤러 오버레이 (좌측 조이스틱 + 우측 배구 액션 버튼 4개)
+        // 4. 멀티터치 가상 컨트롤러 오버레이 (좌측 조이스틱 + 우측 배구 액션 버튼 4개)
         if (showTouchControls) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 32.dp, vertical = 24.dp)
             ) {
-                // 좌측 하단: 좌/우 이동 슬라이드 조이스틱
                 VirtualHorizontalJoystick(
                     modifier = Modifier.align(Alignment.BottomStart),
                     onDirectionChanged = { left, right ->
@@ -119,13 +173,11 @@ fun GameViewerScreen(
                     }
                 )
 
-                // 우측 하단: 더 스파이크 크로스 전용 다이아몬드 액션 버튼 배치
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .size(230.dp)
                 ) {
-                    // 상단: 블로킹 (BLOCK)
                     MultiTouchActionButton(
                         label = "블로킹",
                         color = Color(0xFF42A5F5),
@@ -135,7 +187,6 @@ fun GameViewerScreen(
                             inputSender.updateTouchButton(SpikeButtons.BLOCK, pressed)
                         }
                     )
-                    // 좌측: 리시브 / 다이빙 (RECEIVE)
                     MultiTouchActionButton(
                         label = "리시브",
                         color = Color(0xFF66BB6A),
@@ -145,7 +196,6 @@ fun GameViewerScreen(
                             inputSender.updateTouchButton(SpikeButtons.RECEIVE, pressed)
                         }
                     )
-                    // 하단: 토스 (TOSS)
                     MultiTouchActionButton(
                         label = "토스",
                         color = Color(0xFFFFCA28),
@@ -155,7 +205,6 @@ fun GameViewerScreen(
                             inputSender.updateTouchButton(SpikeButtons.TOSS, pressed)
                         }
                     )
-                    // 우측(메인 대형 버튼): 점프 / 스파이크 (SPIKE)
                     MultiTouchActionButton(
                         label = "스파이크",
                         color = Color(0xFFEF5350),
@@ -179,7 +228,7 @@ fun VirtualHorizontalJoystick(
 ) {
     val context = LocalContext.current
     var knobOffsetX by remember { mutableStateOf(0f) }
-    var currentDir by remember { mutableStateOf(0) } // -1: Left, 0: Neutral, 1: Right
+    var currentDir by remember { mutableStateOf(0) }
 
     Box(
         modifier = modifier

@@ -87,14 +87,14 @@ class ScreenStreamer:
         self.status_callback(f"⚡ 화면 스트리밍 FPS가 {fps} FPS로 변경되었습니다.")
 
     def _get_process_name_by_pid(self, pid: int) -> str:
-        """PID로 프로세스 실행 파일명 조회 (초고속/무권한 kernel32 API)."""
+        """PID로 프로세스 실행 파일명 조회."""
         if not pid:
             return ""
         try:
             import ctypes
             from ctypes import wintypes
             k32 = ctypes.windll.kernel32
-            h_proc = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            h_proc = k32.OpenProcess(0x1000, False, pid)
             if not h_proc:
                 return ""
             try:
@@ -109,12 +109,7 @@ class ScreenStreamer:
         return ""
 
     def find_game_window(self):
-        """
-        'The Spike Cross' 게임 윈도우 핸들(HWND)을 프로세스명 및 타이틀 기반으로 정밀 검색.
-        1. TheSpike-Cross.exe 등 실행 파일명 직접 매칭 (100% 무오류)
-        2. 윈도우 타이틀("the spike", "더 스파이크" 등) 매칭
-        3. 전체 화면/창 모드 중 가장 면적이 넓은 메인 렌더링 윈도우 자동 선택
-        """
+        """'The Spike Cross' 게임 윈도우 핸들(HWND)을 프로세스명 및 타이틀 기반으로 정밀 검색."""
         if not HAS_WIN32:
             return None
 
@@ -141,7 +136,6 @@ class ScreenStreamer:
                 title = win32gui.GetWindowText(hwnd).strip()
                 title_lower = title.lower()
 
-                # PID 및 프로세스명 획득
                 pname = ""
                 try:
                     import win32process
@@ -150,14 +144,10 @@ class ScreenStreamer:
                 except Exception:
                     pass
 
-                # 런처 자체나 브라우저 제외
                 if pname in ("thespikelauncher.exe", "antigravity.exe", "msedge.exe", "chrome.exe") or "launcher" in pname:
                     return True
 
-                # 1순위: TheSpike-Cross.exe, TheSpike.exe 등 게임 프로세스명 일치 (가장 완벽)
                 is_spike_proc = ("thespike" in pname) or ("spike-cross" in pname) or (pname.startswith("spike") and "launcher" not in pname)
-
-                # 2순위: 윈도우 타이틀 일치 (스팀 웹 브라우저/스토어 창 제외)
                 is_spike_title = (
                     "the spike" in title_lower or
                     "spike cross" in title_lower or
@@ -180,26 +170,11 @@ class ScreenStreamer:
             return True
 
         try:
-            # 1. 일반 EnumWindows 스캔
             win32gui.EnumWindows(enum_cb, None)
         except Exception:
             pass
 
-        # 2. 대화형 데스크톱(WinSta0\Default) 보완 스캔 (필요 시)
-        if not candidates:
-            try:
-                import ctypes
-                from ctypes import wintypes
-                u32 = ctypes.windll.user32
-                desk = u32.OpenDesktopW('Default', 0, False, 0x10000000)
-                if desk:
-                    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-                    u32.EnumDesktopWindows(desk, WNDENUMPROC(enum_cb), 0)
-            except Exception:
-                pass
-
         if candidates:
-            # 신뢰도 점수 및 창 면적이 가장 큰 메인 게임 화면 선택
             candidates.sort(key=lambda x: (x["score"], x["width"] * x["height"]), reverse=True)
             best = candidates[0]
             self.detected_game_info = best
@@ -213,7 +188,6 @@ class ScreenStreamer:
         if not HAS_WIN32:
             return False, None
 
-        # 1. 수동 전체 화면 모드
         if self.manual_target_hwnd == 0:
             d_hwnd = win32gui.GetDesktopWindow()
             rect = win32gui.GetWindowRect(d_hwnd)
@@ -226,7 +200,6 @@ class ScreenStreamer:
                 "mode": "desktop"
             }
 
-        # 2. 수동 특정 윈도우 모드
         if self.manual_target_hwnd is not None and self.manual_target_hwnd > 0:
             if win32gui.IsWindow(self.manual_target_hwnd) and not win32gui.IsIconic(self.manual_target_hwnd):
                 rect = win32gui.GetWindowRect(self.manual_target_hwnd)
@@ -249,7 +222,6 @@ class ScreenStreamer:
                     "mode": "fallback"
                 }
 
-        # 3. The Spike Cross 자동 감지 모드
         if self.target_hwnd and win32gui.IsWindow(self.target_hwnd) and not win32gui.IsIconic(self.target_hwnd):
             info = self.detected_game_info or {}
             rect = win32gui.GetWindowRect(self.target_hwnd)
@@ -264,7 +236,6 @@ class ScreenStreamer:
                 "mode": "auto"
             }
 
-        # 미감지 상태일 시 즉시 탐색 1회 시도
         found = self.find_game_window()
         if found:
             self.target_hwnd = found
@@ -284,59 +255,61 @@ class ScreenStreamer:
 
     def capture_frame(self):
         """
-        선택된 창(또는 자동 감지된 The Spike)을 캡처하고,
-        없거나 전체 화면 모드일 경우 데스크톱 화면을 고속 GDI BitBlt로 캡처.
-        GDI 핸들 누수 방지를 위해 엄격한 try-finally 블록 적용.
+        데스크톱 DC 기준 해당 윈도우 영역을 고속 BitBlt로 캡처하여
+        DirectX/OpenGL 하드웨어 가속 게임 창에서도 검은 화면이 나오지 않도록 보장합니다.
         """
         if not HAS_WIN32:
             return self._get_fallback_frame("윈도우 API 비활성화")
 
-        # 1. 수동 지정 모드
+        desktop_hwnd = win32gui.GetDesktopWindow()
+
         if self.manual_target_hwnd is not None:
             if self.manual_target_hwnd == 0:
-                hwnd = win32gui.GetDesktopWindow()
+                hwnd = desktop_hwnd
+            elif win32gui.IsWindow(self.manual_target_hwnd) and not win32gui.IsIconic(self.manual_target_hwnd):
+                hwnd = self.manual_target_hwnd
             else:
-                if win32gui.IsWindow(self.manual_target_hwnd) and not win32gui.IsIconic(self.manual_target_hwnd):
-                    hwnd = self.manual_target_hwnd
-                else:
-                    hwnd = win32gui.GetDesktopWindow()
+                hwnd = desktop_hwnd
         else:
-            # 2. 자동 감지 모드
             if not self.target_hwnd or not win32gui.IsWindow(self.target_hwnd) or win32gui.IsIconic(self.target_hwnd):
                 new_hwnd = self.find_game_window()
-                if new_hwnd:
-                    self.target_hwnd = new_hwnd
-                else:
-                    self.target_hwnd = None
-            hwnd = self.target_hwnd or win32gui.GetDesktopWindow()
+                self.target_hwnd = new_hwnd if new_hwnd else None
+            hwnd = self.target_hwnd or desktop_hwnd
 
-        hwnd_dc = None
+        desk_dc = None
         mfc_dc = None
         save_dc = None
         bitmap = None
         old_obj = None
 
         try:
+            d_left, d_top, d_right, d_bot = win32gui.GetWindowRect(desktop_hwnd)
+            d_width = max(1, d_right - d_left)
+            d_height = max(1, d_bot - d_top)
+
             left, top, right, bot = win32gui.GetWindowRect(hwnd)
+            # 화면 밖으로 나간 좌표 클램핑
+            left = max(d_left, min(left, d_right - 1))
+            top = max(d_top, min(top, d_bot - 1))
+            right = max(left + 1, min(right, d_right))
+            bot = max(top + 1, min(bot, d_bot))
+
             width = right - left
             height = bot - top
 
-            if width <= 0 or height <= 0:
-                hwnd = win32gui.GetDesktopWindow()
-                left, top, right, bot = win32gui.GetWindowRect(hwnd)
-                width = max(1, right - left)
-                height = max(1, bot - top)
+            if width <= 16 or height <= 16:
+                left, top, width, height = d_left, d_top, d_width, d_height
 
-            hwnd_dc = win32gui.GetWindowDC(hwnd)
-            mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+            # 데스크톱 DC에서 해당 창 영역(left, top, width, height)을 직접 캡처 (DirectX 검은 화면 원천 방지)
+            desk_dc = win32gui.GetWindowDC(desktop_hwnd)
+            mfc_dc = win32ui.CreateDCFromHandle(desk_dc)
             save_dc = mfc_dc.CreateCompatibleDC()
 
             bitmap = win32ui.CreateBitmap()
             bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
             old_obj = save_dc.SelectObject(bitmap)
 
-            # 고속 화면 복사 (BitBlt)
-            save_dc.BitBlt((0, 0), (width, height), mfc_dc, (0, 0), win32con.SRCCOPY)
+            save_dc.BitBlt((0, 0), (width, height), mfc_dc, (left, top), win32con.SRCCOPY)
 
             bmpinfo = bitmap.GetInfo()
             bmpstr = bitmap.GetBitmapBits(True)
@@ -346,7 +319,6 @@ class ScreenStreamer:
                 bmpstr, 'raw', 'BGRX', 0, 1
             )
 
-            # 해상도 최적화 (1280x720 이상일 경우 가로 1280 기준으로 리사이즈하여 전송 지연 극소화)
             if width > 1280:
                 new_h = max(1, int(height * (1280.0 / width)))
                 img = img.resize((1280, new_h), Image.Resampling.BILINEAR)
@@ -355,7 +327,6 @@ class ScreenStreamer:
         except Exception as e:
             return self._get_fallback_frame(f"화면 대기 중... ({e})")
         finally:
-            # GDI 리소스 역순 완벽 해제 (핸들 누수 원천 차단)
             if save_dc is not None and old_obj is not None:
                 try:
                     save_dc.SelectObject(old_obj)
@@ -376,14 +347,14 @@ class ScreenStreamer:
                     mfc_dc.DeleteDC()
                 except Exception:
                     pass
-            if hwnd_dc is not None:
+            if desk_dc is not None:
                 try:
-                    win32gui.ReleaseDC(hwnd, hwnd_dc)
+                    win32gui.ReleaseDC(desktop_hwnd, desk_dc)
                 except Exception:
                     pass
 
     def _get_fallback_frame(self, text):
-        """화면 캡처 불가 시 전송할 대기 화면 프레임 반환 (캐싱 적용)."""
+        """화면 캡처 불가 시 전송할 대기 화면 프레임 반환."""
         if text not in self._fallback_cache:
             if len(self._fallback_cache) > 10:
                 self._fallback_cache.clear()
@@ -403,7 +374,7 @@ class ScreenStreamer:
             self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._server_sock.bind(("0.0.0.0", self.port))
-            self._server_sock.listen(1)
+            self._server_sock.listen(5)
             self._server_sock.settimeout(1.0)
             logger.info(f"화면 공유 서버 시작됨 (포트 {self.port}, 목표 {self.target_fps} FPS)")
         except Exception as e:
@@ -419,7 +390,6 @@ class ScreenStreamer:
 
         self._running = True
 
-        # Windows 멀티미디어 1ms 고정밀 타이머 활성화 (소켓 바인딩 성공 후 활성화)
         if HAS_WINMM and not self._timer_active:
             try:
                 winmm.timeBeginPeriod(1)
@@ -432,7 +402,7 @@ class ScreenStreamer:
         return True
 
     def _stream_loop(self):
-        """클라이언트 연결 대기 및 고주사율 프레임 송출 루프."""
+        """클라이언트 연결 수락 루프 (새 연결 요청 시 기존 유휴 소켓을 즉시 교체)."""
         self.status_callback(f"📡 게스트 화면 연결 대기 중 (포트 {self.port}, 최대 {self.target_fps} FPS)...")
         while self._running:
             try:
@@ -440,12 +410,21 @@ class ScreenStreamer:
                     break
                 client, addr = self._server_sock.accept()
                 client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)  # 256KB 버퍼
-                client.settimeout(5.0)
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)
+                client.settimeout(4.0)
+
+                # 이전 클라이언트 소켓이 남아있다면 즉시 종료하여 새 연결에 양보
+                prev_client = self._client_sock
                 self._client_sock = client
+                if prev_client:
+                    try:
+                        prev_client.close()
+                    except Exception:
+                        pass
+
                 self.status_callback(f"🟢 게스트 화면 연결됨! ({addr[0]}) [⚡ {self.target_fps} FPS 스트리밍]")
                 logger.info(f"게스트 화면 클라이언트 연결: {addr}")
-                self._send_frames(client)
+                threading.Thread(target=self._send_frames, args=(client,), daemon=True).start()
             except socket.timeout:
                 continue
             except Exception as e:
@@ -453,31 +432,27 @@ class ScreenStreamer:
                     logger.warning(f"연결 대기 오류: {e}")
 
     def _send_frames(self, client):
-        """연결된 게스트에게 프레임을 실시간으로 연속 송출 (단일 버퍼 재사용 최적화)."""
+        """연결된 게스트에게 프레임을 실시간으로 연속 송출."""
         fps_timer = time.perf_counter()
         frames_sent = 0
         next_frame_time = time.perf_counter()
 
-        # 단일 BytesIO 버퍼 재사용으로 120 FPS 메모리 재할당 및 복사 방지
         buf = io.BytesIO()
 
-        while self._running:
+        while self._running and self._client_sock is client:
             try:
                 frame = self.capture_frame()
 
-                # 앞 4바이트는 길이 헤더 공간으로 비워두고 JPEG 인코딩 수행
                 buf.seek(4)
                 buf.truncate(4)
-                frame.save(buf, format='JPEG', quality=70)
+                frame.save(buf, format='JPEG', quality=72)
 
                 total_len = buf.tell()
                 payload_len = total_len - 4
 
-                # 앞 4바이트 위치에 페이로드 길이 기록
                 buf.seek(0)
                 buf.write(struct.pack(">I", payload_len))
 
-                # memoryview를 사용해 추가 메모리 복사 없이 즉시 전송
                 with buf.getbuffer() as view:
                     client.sendall(view)
 
@@ -488,7 +463,6 @@ class ScreenStreamer:
                     frames_sent = 0
                     fps_timer = now
 
-                # 120 FPS 초정밀 프레임 페이싱 (하이브리드 슬립 + 스핀락)
                 target_interval = self.frame_interval
                 next_frame_time += target_interval
                 sleep_time = next_frame_time - time.perf_counter()
@@ -499,13 +473,13 @@ class ScreenStreamer:
                 while time.perf_counter() < next_frame_time:
                     pass
 
-                # 프레임이 과도하게 밀렸을 경우 시간 동기화
                 if time.perf_counter() - next_frame_time > target_interval * 2:
                     next_frame_time = time.perf_counter()
 
-            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, socket.timeout):
-                logger.info("게스트 연결 끊김")
-                self.status_callback("⚠️ 게스트 화면 연결이 끊어졌습니다.")
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, socket.timeout, OSError):
+                if self._client_sock is client:
+                    logger.info("게스트 연결 끊김")
+                    self.status_callback("⚠️ 게스트 화면 연결이 끊어졌습니다. 재연결 대기 중...")
                 break
             except Exception as e:
                 logger.debug(f"프레임 전송 예외: {e}")
@@ -553,12 +527,7 @@ class ScreenStreamer:
 
     @staticmethod
     def list_capturable_windows():
-        """
-        현재 시스템에서 사용자가 선택해 공유할 수 있는 윈도우 목록을 반환합니다.
-        - [자동 감지] The Spike Cross
-        - [전체 화면] 전체 데스크톱 화면
-        - 실행 중인 창 목록 (The Spike 창은 최상단 우선 표시)
-        """
+        """현재 시스템에서 사용자가 선택해 공유할 수 있는 윈도우 목록을 반환합니다."""
         windows = [
             {
                 "hwnd": -1,
@@ -657,28 +626,12 @@ class ScreenStreamer:
             else:
                 normal_windows.append(entry)
 
-        # 1. win32gui.EnumWindows 스캔
         def enum_cb(h, _):
             inspect_window(h)
             return True
 
         try:
             win32gui.EnumWindows(enum_cb, None)
-        except Exception:
-            pass
-
-        # 2. 대화형 데스크톱(WinSta0\Default) 보완 스캔
-        try:
-            winsta0 = u32.OpenWindowStationW('WinSta0', False, 0x10000000)
-            if winsta0:
-                u32.SetProcessWindowStation(winsta0)
-            desk = u32.OpenDesktopW('Default', 0, False, 0x10000000)
-            if desk:
-                WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-                def d_cb(h, _):
-                    inspect_window(h)
-                    return True
-                u32.EnumDesktopWindows(desk, WNDENUMPROC(d_cb), 0)
         except Exception:
             pass
 

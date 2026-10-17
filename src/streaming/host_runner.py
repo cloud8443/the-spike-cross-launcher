@@ -55,7 +55,7 @@ class HostRunner:
         self.screen_streamer = ScreenStreamer(
             port=self.stream_port,
             status_callback=self.status_callback,
-            target_fps=120
+            target_fps=60
         )
 
     def _get_local_ip(self):

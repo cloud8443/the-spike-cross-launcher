@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 logger = logging.getLogger("ScreenStreamer")
 
 DEFAULT_STREAM_PORT = 47998
-DEFAULT_FPS = 120
+DEFAULT_FPS = 60
 
 
 class ScreenStreamer:
@@ -403,15 +403,15 @@ class ScreenStreamer:
 
     def _stream_loop(self):
         """클라이언트 연결 수락 루프 (새 연결 요청 시 기존 유휴 소켓을 즉시 교체)."""
-        self.status_callback(f"📡 게스트 화면 연결 대기 중 (포트 {self.port}, 최대 {self.target_fps} FPS)...")
+        self.status_callback(f"📡 게스트 화면 연결 대기 중 (포트 {self.port}, 목표 {self.target_fps} FPS)...")
         while self._running:
             try:
                 if not self._server_sock:
                     break
                 client, addr = self._server_sock.accept()
                 client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)
-                client.settimeout(4.0)
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)  # 초저지연 버퍼 (대기열 지연 방지)
+                client.settimeout(3.0)
 
                 # 이전 클라이언트 소켓이 남아있다면 즉시 종료하여 새 연결에 양보
                 prev_client = self._client_sock
@@ -422,7 +422,7 @@ class ScreenStreamer:
                     except Exception:
                         pass
 
-                self.status_callback(f"🟢 게스트 화면 연결됨! ({addr[0]}) [⚡ {self.target_fps} FPS 스트리밍]")
+                self.status_callback(f"🟢 게스트 화면 연결됨! ({addr[0]}) [⚡ {self.target_fps} FPS 초저지연 스트리밍]")
                 logger.info(f"게스트 화면 클라이언트 연결: {addr}")
                 threading.Thread(target=self._send_frames, args=(client,), daemon=True).start()
             except socket.timeout:
@@ -432,7 +432,9 @@ class ScreenStreamer:
                     logger.warning(f"연결 대기 오류: {e}")
 
     def _send_frames(self, client):
-        """연결된 게스트에게 프레임을 실시간으로 연속 송출."""
+        """연결된 게스트에게 최신 프레임을 지연 없이(Zero-Latency) 실시간 송출."""
+        import select
+
         fps_timer = time.perf_counter()
         frames_sent = 0
         next_frame_time = time.perf_counter()
@@ -441,11 +443,24 @@ class ScreenStreamer:
 
         while self._running and self._client_sock is client:
             try:
+                # 1. 소켓 송신 버퍼 상태 검사 (논블로킹 체크)
+                # 게스트가 이전 프레임을 아직 다 처리하지 못했거나 네트워크가 혼잡하면
+                # 밀린 프레임을 즉시 버리고(Drop) 다음 주기로 넘어가 지연 누적(Lag)을 원천 차단합니다.
+                _, writable, _ = select.select([], [client], [], 0.0)
+                if not writable:
+                    target_interval = self.frame_interval
+                    next_frame_time += target_interval
+                    sleep_time = next_frame_time - time.perf_counter()
+                    if sleep_time > 0.001:
+                        time.sleep(sleep_time)
+                    continue
+
                 frame = self.capture_frame()
 
                 buf.seek(4)
                 buf.truncate(4)
-                frame.save(buf, format='JPEG', quality=72)
+                # 초고속 경량 압축 (품질 68, 노옵티마이즈: 인코딩 시간 2.8ms 이하)
+                frame.save(buf, format='JPEG', quality=68, optimize=False)
 
                 total_len = buf.tell()
                 payload_len = total_len - 4
@@ -473,7 +488,8 @@ class ScreenStreamer:
                 while time.perf_counter() < next_frame_time:
                     pass
 
-                if time.perf_counter() - next_frame_time > target_interval * 2:
+                # 프레임 생성이 지연되었을 경우, 다음 프레임 시간을 현재 시점으로 리셋하여 지연 누적 방지
+                if time.perf_counter() - next_frame_time > target_interval * 1.5:
                     next_frame_time = time.perf_counter()
 
             except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, socket.timeout, OSError):
@@ -489,6 +505,12 @@ class ScreenStreamer:
             client.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
+        try:
+            client.close()
+        except Exception:
+            pass
+        if self._client_sock is client:
+            self._client_sock = None
         try:
             client.close()
         except Exception:

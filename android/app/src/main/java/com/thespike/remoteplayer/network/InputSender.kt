@@ -12,13 +12,13 @@ import java.util.concurrent.atomic.AtomicInteger
 object SpikeButtons {
     const val LEFT    = 1 shl 0  // 1   : 좌측 이동
     const val RIGHT   = 1 shl 1  // 2   : 우측 이동
-    const val UP      = 1 shl 2  // 4   : 상단
-    const val DOWN    = 1 shl 3  // 8   : 하단
-    const val SPIKE   = 1 shl 4  // 16  : 점프 / 스파이크
-    const val RECEIVE = 1 shl 5  // 32  : 리시브 / 다이빙
-    const val TOSS    = 1 shl 6  // 64  : 토스
-    const val BLOCK   = 1 shl 7  // 128 : 블로킹
-    const val FEINT   = 1 shl 8  // 256 : 페인트 / 특수기
+    const val UP      = 1 shl 2  // 4   : 상단 이동
+    const val DOWN    = 1 shl 3  // 8   : 하단 이동
+    const val SPIKE   = 1 shl 4  // 16  : 스파이크
+    const val RECEIVE = 1 shl 5  // 32  : 리시브
+    const val BLOCK   = 1 shl 6  // 64  : 블로킹
+    const val SLIDE   = 1 shl 7  // 128 : 슬라이딩
+    const val TOSS    = 1 shl 8  // 256 : 호환용
 }
 
 class InputSender(
@@ -131,8 +131,10 @@ class InputSender(
             append(",\"down\":").append((combinedMask and SpikeButtons.DOWN) != 0)
             append(",\"spike\":").append((combinedMask and SpikeButtons.SPIKE) != 0)
             append(",\"receive\":").append((combinedMask and SpikeButtons.RECEIVE) != 0)
-            append(",\"toss\":").append((combinedMask and SpikeButtons.TOSS) != 0)
             append(",\"block\":").append((combinedMask and SpikeButtons.BLOCK) != 0)
+            append(",\"slide\":").append((combinedMask and SpikeButtons.SLIDE) != 0)
+            append(",\"sliding\":").append((combinedMask and SpikeButtons.SLIDE) != 0)
+            append(",\"toss\":").append((combinedMask and SpikeButtons.TOSS) != 0)
             append("}")
         }
 

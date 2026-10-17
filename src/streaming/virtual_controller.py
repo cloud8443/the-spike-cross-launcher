@@ -37,10 +37,10 @@ ACTION_TO_XBOX = {
     "DOWN":          "DPAD_DOWN",
     "LEFT":          "DPAD_LEFT",
     "RIGHT":         "DPAD_RIGHT",
-    "RECEIVE_SLIDE": "A",
-    "JUMP_SPIKE":    "X",
-    "BLOCK":         "Y",
-    "SPECIAL_TOSS":  "B",
+    "RECEIVE_SLIDE": "X",
+    "JUMP_SPIKE":    "A",
+    "BLOCK":         "B",
+    "SPECIAL_TOSS":  "Y",
     "PAUSE":         "START",
 }
 
@@ -142,10 +142,10 @@ class Win32KeyboardFallback:
         "DPAD_DOWN":  (0x28, 0x50, True),   # Down Arrow
         "DPAD_LEFT":  (0x25, 0x4B, True),   # Left Arrow
         "DPAD_RIGHT": (0x27, 0x4D, True),   # Right Arrow
-        "A":          (0x4B, 0x25, False),  # 'K' (리시브 / 슬라이딩)
-        "X":          (0x4C, 0x26, False),  # 'L' (점프 / 스파이크)
-        "Y":          (0x49, 0x17, False),  # 'I' (블로킹)
-        "B":          (0x4A, 0x24, False),  # 'J' (특수기 / 토스)
+        "A":          (0x4C, 0x26, False),  # 'L' (스파이크)
+        "X":          (0x4B, 0x25, False),  # 'K' (리시브)
+        "B":          (0x49, 0x17, False),  # 'I' (블로킹)
+        "Y":          (0x4A, 0x24, False),  # 'J' (슬라이딩)
         "START":      (0x1B, 0x01, False),  # Escape (일시정지)
     }
 

@@ -173,47 +173,52 @@ fun GameViewerScreen(
                     }
                 )
 
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(230.dp)
+                // 4. 2P 액션 버튼 (ㅗ 모양 배치: 상단 블로킹 / 하단 좌-중-우 슬라이딩-리시브-스파이크)
+                Column(
+                    modifier = Modifier.align(Alignment.BottomEnd),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
+                    // 상단: 중간 바로 위에 블로킹
                     MultiTouchActionButton(
                         label = "블로킹",
                         color = Color(0xFF42A5F5),
                         size = 72.dp,
-                        modifier = Modifier.align(Alignment.TopCenter),
                         onStateChanged = { pressed ->
                             inputSender.updateTouchButton(SpikeButtons.BLOCK, pressed)
                         }
                     )
-                    MultiTouchActionButton(
-                        label = "리시브",
-                        color = Color(0xFF66BB6A),
-                        size = 72.dp,
-                        modifier = Modifier.align(Alignment.CenterStart),
-                        onStateChanged = { pressed ->
-                            inputSender.updateTouchButton(SpikeButtons.RECEIVE, pressed)
-                        }
-                    )
-                    MultiTouchActionButton(
-                        label = "토스",
-                        color = Color(0xFFFFCA28),
-                        size = 72.dp,
-                        modifier = Modifier.align(Alignment.BottomCenter),
-                        onStateChanged = { pressed ->
-                            inputSender.updateTouchButton(SpikeButtons.TOSS, pressed)
-                        }
-                    )
-                    MultiTouchActionButton(
-                        label = "스파이크",
-                        color = Color(0xFFEF5350),
-                        size = 86.dp,
-                        modifier = Modifier.align(Alignment.CenterEnd),
-                        onStateChanged = { pressed ->
-                            inputSender.updateTouchButton(SpikeButtons.SPIKE, pressed)
-                        }
-                    )
+
+                    // 하단 가로 3버튼: 슬라이딩 (좌) - 리시브 (중) - 스파이크 (우)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MultiTouchActionButton(
+                            label = "슬라이딩",
+                            color = Color(0xFFFF9800),
+                            size = 72.dp,
+                            onStateChanged = { pressed ->
+                                inputSender.updateTouchButton(SpikeButtons.SLIDE, pressed)
+                            }
+                        )
+                        MultiTouchActionButton(
+                            label = "리시브",
+                            color = Color(0xFF66BB6A),
+                            size = 76.dp,
+                            onStateChanged = { pressed ->
+                                inputSender.updateTouchButton(SpikeButtons.RECEIVE, pressed)
+                            }
+                        )
+                        MultiTouchActionButton(
+                            label = "스파이크",
+                            color = Color(0xFFEF5350),
+                            size = 84.dp,
+                            onStateChanged = { pressed ->
+                                inputSender.updateTouchButton(SpikeButtons.SPIKE, pressed)
+                            }
+                        )
+                    }
                 }
             }
         }

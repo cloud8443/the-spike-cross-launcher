@@ -201,10 +201,11 @@ class HostRunner:
                 if pkt.get("right"): active_xbox_btns.add("DPAD_RIGHT")
                 if pkt.get("up"): active_xbox_btns.add("DPAD_UP")
                 if pkt.get("down"): active_xbox_btns.add("DPAD_DOWN")
-                if pkt.get("receive"): active_xbox_btns.add("A")
-                if pkt.get("spike"): active_xbox_btns.add("X")
-                if pkt.get("block"): active_xbox_btns.add("Y")
-                if pkt.get("toss"): active_xbox_btns.add("B")
+                # The Spike Cross 2P 실제 게임 컨트롤 매핑
+                if pkt.get("spike"): active_xbox_btns.add("A")    # 스파이크
+                if pkt.get("receive"): active_xbox_btns.add("X")  # 리시브
+                if pkt.get("block"): active_xbox_btns.add("B")    # 블로킹
+                if pkt.get("slide") or pkt.get("sliding") or pkt.get("toss"): active_xbox_btns.add("Y")  # 슬라이딩
                 self.gamepad_manager.sync_pressed_buttons(active_xbox_btns)
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:

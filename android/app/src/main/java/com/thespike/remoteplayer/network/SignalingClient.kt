@@ -43,6 +43,12 @@ class SignalingClient(
     private val _gameStartedHostIp = MutableStateFlow<String?>(null)
     val gameStartedHostIp: StateFlow<String?> = _gameStartedHostIp
 
+    private val _hostLocalIp = MutableStateFlow<String?>(null)
+    val hostLocalIp: StateFlow<String?> = _hostLocalIp
+
+    private val _currentRoomId = MutableStateFlow<String>("default")
+    val currentRoomId: StateFlow<String> = _currentRoomId
+
     private val _errorMsg = MutableStateFlow<String?>(null)
     val errorMsg: StateFlow<String?> = _errorMsg
 
@@ -152,6 +158,9 @@ class SignalingClient(
                     val code = json.optString("room_id").ifEmpty { json.optString("code", "") }
                     val title = json.optString("room_name").ifEmpty { json.optString("title", "대기실 ($code)") }
                     val hostName = json.optString("host_name", "방장")
+                    if (code.isNotEmpty()) {
+                        _currentRoomId.value = code
+                    }
                     // 서버가 준 host_ip가 없으면 현재 방 목록에서 해당 방의 hostIp 조회
                     val fallbackIp = _rooms.value.find { it.code.equals(code, ignoreCase = true) }?.hostIp ?: ""
                     val hostIp = json.optString("host_ip").ifEmpty { fallbackIp }
@@ -185,6 +194,14 @@ class SignalingClient(
                     if (payload != null && payload.optString("type") == "host_info") {
                         val sigHostIp = payload.optString("host_ip").ifEmpty {
                             json.optString("host_ip").ifEmpty { _joinedRoom.value?.hostIp ?: "" }
+                        }
+                        val sigLocalIp = payload.optString("local_ip").ifEmpty { null }
+                        val sigRoomId = payload.optString("room_id").ifEmpty { _joinedRoom.value?.code ?: "default" }
+                        if (sigRoomId.isNotEmpty()) {
+                            _currentRoomId.value = sigRoomId
+                        }
+                        if (!sigLocalIp.isNullOrBlank()) {
+                            _hostLocalIp.value = sigLocalIp
                         }
                         if (sigHostIp.isNotEmpty()) {
                             val currentRoom = _joinedRoom.value

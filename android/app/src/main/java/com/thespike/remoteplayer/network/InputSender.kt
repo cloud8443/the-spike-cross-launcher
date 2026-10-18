@@ -23,6 +23,7 @@ object SpikeButtons {
     const val BLOCK   = 1 shl 6  // 64  : 블로킹
     const val SLIDE   = 1 shl 7  // 128 : 슬라이딩
     const val TOSS    = 1 shl 8  // 256 : 호환용
+    const val PAUSE   = 1 shl 9  // 512 : 일시정지 (Start)
 }
 
 /**
@@ -200,6 +201,7 @@ class InputSender(
             append(",\"slide\":").append((combinedMask and SpikeButtons.SLIDE) != 0)
             append(",\"sliding\":").append((combinedMask and SpikeButtons.SLIDE) != 0)
             append(",\"toss\":").append((combinedMask and SpikeButtons.TOSS) != 0)
+            append(",\"pause\":").append((combinedMask and SpikeButtons.PAUSE) != 0)
             append("}")
         }
 

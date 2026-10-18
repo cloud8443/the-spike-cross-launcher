@@ -360,7 +360,7 @@ class HostRunner:
                 fps = int(pkt.get("fps", 120))
                 self.screen_streamer.set_fps(fps)
 
-            # Android 전용 비트마스크 패킷 (터치패드 및 모바일 게임패드) 완벽 호환
+            # 비트마스크 패킷 (Android 터치패드/모바일 패드 및 PC 게스트 물리 컨트롤러) 완벽 호환
             elif "mask" in pkt:
                 active_xbox_btns = set()
                 if pkt.get("left"): active_xbox_btns.add("DPAD_LEFT")
@@ -372,6 +372,10 @@ class HostRunner:
                 if pkt.get("receive"): active_xbox_btns.add("X")  # 리시브
                 if pkt.get("block"): active_xbox_btns.add("B")    # 블로킹
                 if pkt.get("slide") or pkt.get("sliding") or pkt.get("toss"): active_xbox_btns.add("Y")  # 슬라이딩
+                if pkt.get("pause") or pkt.get("start"): active_xbox_btns.add("START")
+                if pkt.get("back") or pkt.get("select"): active_xbox_btns.add("BACK")
+                if pkt.get("lb"): active_xbox_btns.add("LB")
+                if pkt.get("rb"): active_xbox_btns.add("RB")
                 self.gamepad_manager.sync_pressed_buttons(active_xbox_btns)
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:

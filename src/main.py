@@ -1234,7 +1234,8 @@ class SpikeLauncher(QMainWindow):
 
             self.host_runner = HostRunner(
                 status_callback=host_status_cb,
-                driver_prompt_callback=self.prompt_vigembus_install
+                driver_prompt_callback=self.prompt_vigembus_install,
+                room_id=self.current_room_id
             )
             ok, msg = self.host_runner.start_session()
             if ok:
@@ -1251,7 +1252,7 @@ class SpikeLauncher(QMainWindow):
                     conn_info.get('stream_port', 47998)
                 )
                 self.chat_display.addItem(f"[안내] 게스트에게 화면 공유 및 연결 정보({host_ip}:47998)를 전송했습니다.")
-                self.chat_display.addItem("[팁] 모바일 연결 시 호스트 PC와 동일한 Wi-Fi(공유기)에 연결되어 있어야 초저지연 스트리밍이 작동합니다.")
+                self.chat_display.addItem("[팁] 모바일/PC 게스트는 같은 Wi-Fi 또는 다른 네트워크(WAN 무지연 릴레이)에서 바로 연결됩니다.")
             else:
                 self.chat_display.addItem(f"[오류] 호스트 시작 실패: {msg}")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
@@ -1268,6 +1269,8 @@ class SpikeLauncher(QMainWindow):
         ptype = payload.get('type')
         if ptype == 'host_info' and self.streaming_role == 'streaming_guest':
             host_ip = payload.get('host_ip', '127.0.0.1')
+            host_local_ip = payload.get('local_ip', host_ip)
+            room_id = payload.get('room_id', self.current_room_id)
             input_port = payload.get('input_port', 47990)
             stream_port = payload.get('stream_port', 47998)
             self.chat_display.addItem(f"[시스템] 호스트 연결 정보 수신 완료 (화면 공유 포트: {stream_port})")
@@ -1276,19 +1279,26 @@ class SpikeLauncher(QMainWindow):
                 self.chat_display.addItem(f"[게스트] {text}")
                 self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
-            self.guest_runner = GuestRunner(host_ip, input_port, status_callback=guest_status_cb)
+            self.guest_runner = GuestRunner(
+                host_ip,
+                input_port,
+                status_callback=guest_status_cb,
+                host_local_ip=host_local_ip,
+                room_id=room_id
+            )
             ok, msg = self.guest_runner.start_session()
             if ok:
-                self.chat_display.addItem("[안내] 2P 키보드 입력이 호스트로 실시간 전송됩니다!")
+                self.chat_display.addItem("[안내] 2P 키보드 및 연결된 물리 게임패드 입력이 호스트로 실시간 전송됩니다!")
 
             if self.viewer_window:
                 try:
                     self.viewer_window.close()
                 except Exception:
                     pass
-            self.viewer_window = GameStreamViewerWindow(host_ip, stream_port, guest_runner=self.guest_runner)
+            best_stream_ip, best_stream_port = self.guest_runner.get_best_stream_endpoint(stream_port)
+            self.viewer_window = GameStreamViewerWindow(best_stream_ip, best_stream_port, guest_runner=self.guest_runner)
             self.viewer_window.show()
-            self.chat_display.addItem("[안내] 📺 실시간 게임 화면 창이 열렸습니다! 창에서 바로 2P 플레이가 가능합니다.")
+            self.chat_display.addItem("[안내] 📺 실시간 게임 화면 창이 열렸습니다! 창에서 키보드 또는 물리 게임패드로 2P 플레이가 가능합니다.")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))
 
     def _qt_key_to_string(self, key):

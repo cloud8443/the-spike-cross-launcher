@@ -36,6 +36,7 @@ class HybridUDPProtocol(asyncio.DatagramProtocol):
         # (ip, port) -> target (ip, port): JSON 파싱 없는 초고속 포워딩 테이블
         self.forward_map = {}
         self.latest_room_id = "default"
+        self.latest_host_pub = None
 
     def connection_made(self, transport):
         self.transport = transport
@@ -60,6 +61,11 @@ class HybridUDPProtocol(asyncio.DatagramProtocol):
                     self.forward_map[addr] = host_pub
                     self.forward_map[host_pub] = addr
                     self.transport.sendto(data, host_pub)
+                    return
+            # 최신 활성 호스트로 글로벌 폴백 포워딩
+            if self.latest_host_pub and self.latest_host_pub != addr:
+                self.forward_map[addr] = self.latest_host_pub
+                self.transport.sendto(data, self.latest_host_pub)
             return
 
         # [제어 경로] STUN 등록 및 홀 펀칭 좌표 교환
@@ -79,6 +85,7 @@ class HybridUDPProtocol(asyncio.DatagramProtocol):
 
                 room["host_pub"] = addr
                 room["host_loc"] = (pkt.get("local_ip", "127.0.0.1"), int(pkt.get("local_port", UDP_PORT)))
+                self.latest_host_pub = addr
 
                 # 호스트에게 자신의 공인 IP/Port 응답
                 ack = json.dumps({

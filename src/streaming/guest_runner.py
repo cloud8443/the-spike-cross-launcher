@@ -251,6 +251,39 @@ class GuestRunner:
         # UDP 유실 방지를 위해 release_all 패킷 전송
         self._send_packet({"type": "release_all"})
 
+    def send_gamepad_state(self, left=False, right=False, up=False, down=False,
+                           spike=False, receive=False, block=False, slide=False,
+                           pause=False, lb=False, rb=False):
+        """PC 게스트에 연결된 물리 게임패드(Xbox, PS, USB 패드) 상태를 호스트에 실시간 무지연 전송."""
+        if not self._udp_sock or not self._running:
+            return
+        mask = 0
+        if left: mask |= 1
+        if right: mask |= 2
+        if up: mask |= 4
+        if down: mask |= 8
+        if spike: mask |= 16
+        if receive: mask |= 32
+        if block: mask |= 64
+        if slide: mask |= 128
+        pkt = {
+            "player": 2,
+            "mask": mask,
+            "left": bool(left),
+            "right": bool(right),
+            "up": bool(up),
+            "down": bool(down),
+            "spike": bool(spike),
+            "receive": bool(receive),
+            "block": bool(block),
+            "slide": bool(slide),
+            "sliding": bool(slide),
+            "pause": bool(pause),
+            "lb": bool(lb),
+            "rb": bool(rb),
+        }
+        self._send_packet(pkt)
+
     def _state_sync_loop(self):
         """
         UDP 패킷 유실로 인해 특정 키의 Release 이벤트가 누락되는 현상을 방지하기 위해

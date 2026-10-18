@@ -4,6 +4,7 @@ screen_viewer.py
 초저지연으로 화면에 렌더링하고, 2P 키보드 입력을 즉시 캡처하여 전달하는 전용 원격 플레이어 창.
 """
 
+import ctypes
 import logging
 import socket
 import struct
@@ -19,6 +20,144 @@ from PyQt6.QtGui import QImage, QPixmap, QPainter, QKeyEvent, QColor, QFont, QFo
 logger = logging.getLogger("ScreenViewer")
 
 MAX_FRAME_SIZE = 5 * 1024 * 1024  # 5MB 비정상 패킷 방어 상한선
+
+# XInput 버튼 플래그 상수
+XINPUT_GAMEPAD_DPAD_UP = 0x0001
+XINPUT_GAMEPAD_DPAD_DOWN = 0x0002
+XINPUT_GAMEPAD_DPAD_LEFT = 0x0004
+XINPUT_GAMEPAD_DPAD_RIGHT = 0x0008
+XINPUT_GAMEPAD_START = 0x0010
+XINPUT_GAMEPAD_BACK = 0x0020
+XINPUT_GAMEPAD_LEFT_THUMB = 0x0040
+XINPUT_GAMEPAD_RIGHT_THUMB = 0x0080
+XINPUT_GAMEPAD_LEFT_SHOULDER = 0x0100
+XINPUT_GAMEPAD_RIGHT_SHOULDER = 0x0200
+XINPUT_GAMEPAD_A = 0x1000
+XINPUT_GAMEPAD_B = 0x2000
+XINPUT_GAMEPAD_X = 0x4000
+XINPUT_GAMEPAD_Y = 0x8000
+
+
+class XINPUT_GAMEPAD(ctypes.Structure):
+    _fields_ = [
+        ('wButtons', ctypes.c_ushort),
+        ('bLeftTrigger', ctypes.c_ubyte),
+        ('bRightTrigger', ctypes.c_ubyte),
+        ('sThumbLX', ctypes.c_short),
+        ('sThumbLY', ctypes.c_short),
+        ('sThumbRX', ctypes.c_short),
+        ('sThumbRY', ctypes.c_short),
+    ]
+
+
+class XINPUT_STATE(ctypes.Structure):
+    _fields_ = [
+        ('dwPacketNumber', ctypes.c_ulong),
+        ('Gamepad', XINPUT_GAMEPAD),
+    ]
+
+
+class PhysicalGamepadPoller(QObject):
+    """
+    게스트 PC에 연결된 물리 게임패드(Xbox One/Series, PS4/PS5, 8BitDo 등)를
+    120Hz 주기로 폴링하여 호스트 2P 패드로 실시간 무지연 전달하는 백그라운드 엔진.
+    """
+    status_changed = pyqtSignal(str)
+
+    def __init__(self, guest_runner=None):
+        super().__init__()
+        self.guest_runner = guest_runner
+        self._running = False
+        self._xinput = None
+        self._connected = False
+        self._active_index = -1
+        self._init_xinput()
+
+    def _init_xinput(self):
+        for dll in ['xinput1_4.dll', 'xinput1_3.dll', 'xinput9_1_0.dll']:
+            try:
+                self._xinput = ctypes.windll.LoadLibrary(dll)
+                break
+            except Exception:
+                pass
+
+    def start(self):
+        if not self._xinput:
+            logger.info("XInput DLL 로드 실패 (물리 패드 비활성화)")
+            return
+        self._running = True
+        threading.Thread(target=self._poll_loop, daemon=True).start()
+
+    def stop(self):
+        self._running = False
+
+    def _poll_loop(self):
+        state = XINPUT_STATE()
+        last_buttons = 0
+        last_lx_dir = 0
+        last_ly_dir = 0
+        last_heartbeat = time.perf_counter()
+
+        while self._running:
+            found_controller = False
+            for user_idx in range(4):
+                res = self._xinput.XInputGetState(user_idx, ctypes.byref(state))
+                if res == 0:
+                    found_controller = True
+                    if not self._connected or self._active_index != user_idx:
+                        self._connected = True
+                        self._active_index = user_idx
+                        self.status_changed.emit(f"🎮 패드 #{user_idx + 1} 연결됨")
+                        logger.info(f"게스트 물리 게임패드 감지 (슬롯 #{user_idx + 1})")
+
+                    gp = state.Gamepad
+                    wButtons = gp.wButtons
+                    sThumbLX = gp.sThumbLX
+                    sThumbLY = gp.sThumbLY
+                    bLeftTrigger = gp.bLeftTrigger
+                    bRightTrigger = gp.bRightTrigger
+
+                    # 데드존 (32767 중 약 25% = 8000)
+                    DEADZONE = 8000
+                    left = bool((wButtons & XINPUT_GAMEPAD_DPAD_LEFT != 0) or (sThumbLX < -DEADZONE))
+                    right = bool((wButtons & XINPUT_GAMEPAD_DPAD_RIGHT != 0) or (sThumbLX > DEADZONE))
+                    up = bool((wButtons & XINPUT_GAMEPAD_DPAD_UP != 0) or (sThumbLY > DEADZONE))
+                    down = bool((wButtons & XINPUT_GAMEPAD_DPAD_DOWN != 0) or (sThumbLY < -DEADZONE))
+
+                    # 액션 버튼
+                    spike = bool((wButtons & XINPUT_GAMEPAD_A != 0) or (wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER != 0) or (bRightTrigger > 30))
+                    receive = bool((wButtons & XINPUT_GAMEPAD_X != 0) or (wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER != 0) or (bLeftTrigger > 30))
+                    block = bool(wButtons & XINPUT_GAMEPAD_B != 0)
+                    slide = bool(wButtons & XINPUT_GAMEPAD_Y != 0)
+                    pause = bool(wButtons & XINPUT_GAMEPAD_START != 0)
+
+                    now = time.perf_counter()
+                    # 상태 변화 감지 또는 30ms 주기 하트비트 전송
+                    if (wButtons != last_buttons or left != (last_lx_dir < 0) or right != (last_lx_dir > 0)
+                            or up != (last_ly_dir > 0) or down != (last_ly_dir < 0)
+                            or (now - last_heartbeat >= 0.03)):
+                        last_buttons = wButtons
+                        last_lx_dir = -1 if left else (1 if right else 0)
+                        last_ly_dir = 1 if up else (-1 if down else 0)
+                        last_heartbeat = now
+
+                        if self.guest_runner:
+                            self.guest_runner.send_gamepad_state(
+                                left=left, right=right, up=up, down=down,
+                                spike=spike, receive=receive, block=block, slide=slide,
+                                pause=pause
+                            )
+                    break
+
+            if not found_controller:
+                if self._connected:
+                    self._connected = False
+                    self._active_index = -1
+                    self.status_changed.emit("⌨️ 키보드 모드 (패드 없음)")
+                    logger.info("게스트 물리 게임패드 연결 해제됨")
+                time.sleep(0.5)
+            else:
+                time.sleep(0.008)  # 120Hz 고속 폴링
 
 
 class StreamReceiverThread(QObject):
@@ -221,6 +360,18 @@ class GameStreamViewerWindow(QWidget):
         self._init_ui()
         self._start_stream()
 
+        # 물리 게임패드 폴러 시작
+        self._gamepad_poller = PhysicalGamepadPoller(self.guest_runner)
+        self._gamepad_poller.status_changed.connect(self._on_pad_status)
+        self._gamepad_poller.start()
+
+    def _on_pad_status(self, text: str):
+        self.lbl_pad.setText(text)
+        if "패드 #" in text:
+            self.lbl_pad.setStyleSheet("font-size: 11px; color: #34d399; font-weight: bold;")
+        else:
+            self.lbl_pad.setStyleSheet("font-size: 11px; color: #94a3b8;")
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -241,6 +392,9 @@ class GameStreamViewerWindow(QWidget):
 
         self.lbl_status = QLabel("🟢 화면 연결 중...")
         self.lbl_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #10b981;")
+
+        self.lbl_pad = QLabel("🎮 패드 감지 대기 중...")
+        self.lbl_pad.setStyleSheet("font-size: 11px; color: #94a3b8;")
 
         self.lbl_fps = QLabel("FPS: 측정 중 | 딜레이: 초저지연 (<8ms)")
         self.lbl_fps.setStyleSheet("font-size: 11px; color: #94a3b8;")
@@ -273,6 +427,7 @@ class GameStreamViewerWindow(QWidget):
 
         tb_layout.addWidget(self.lbl_title)
         tb_layout.addWidget(self.lbl_status)
+        tb_layout.addWidget(self.lbl_pad)
         tb_layout.addStretch()
         tb_layout.addWidget(self.lbl_fps)
         tb_layout.addWidget(self.btn_fps_mode)
@@ -402,6 +557,8 @@ class GameStreamViewerWindow(QWidget):
         super().focusOutEvent(event)
 
     def closeEvent(self, event):
+        if hasattr(self, '_gamepad_poller') and self._gamepad_poller:
+            self._gamepad_poller.stop()
         if self.guest_runner:
             self.guest_runner.release_all_keys()
         if self._receiver:

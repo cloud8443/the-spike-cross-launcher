@@ -301,6 +301,7 @@ class VirtualGamepadManager:
             self.fallback_mode = False
             self._pressed_buttons.clear()
             logger.info("ViGEmBus 가상 Xbox 360 패드 생성 완료")
+            self.pulse_initial_presence()
             return True, "가상 Xbox 360 패드(ViGEmBus)가 정상적으로 생성되었습니다."
 
         except Exception as e:
@@ -318,6 +319,48 @@ class VirtualGamepadManager:
                 "ViGEmBus 드라이버가 설치되어 있는지 확인해주세요.\n"
                 "https://github.com/nefarius/ViGEmBus/releases"
             )
+
+    def pulse_initial_presence(self):
+        """게임 및 Steam Input이 가상 2P 패드를 즉각 인식하도록 신호를 전송."""
+        if not self.gamepad or self.fallback_mode:
+            return
+
+        def _pulse():
+            time.sleep(0.5)
+            with self._lock:
+                if self.gamepad and not self.fallback_mode:
+                    btn_a = self._button_map.get("A")
+                    if btn_a:
+                        self.gamepad.press_button(button=btn_a)
+                        self.gamepad.update()
+            time.sleep(0.08)
+            with self._lock:
+                if self.gamepad and not self.fallback_mode:
+                    btn_a = self._button_map.get("A")
+                    if btn_a:
+                        self.gamepad.release_button(button=btn_a)
+                        self.gamepad.update()
+
+        threading.Thread(target=_pulse, daemon=True).start()
+
+    def _update_joystick_axes(self):
+        """D-Pad 이동 상태에 맞춰 가상 Left Thumbstick(아날로그 L스틱)을 동시 연동하여 게임 내 100% 인식 보장."""
+        if not self.gamepad or self.fallback_mode:
+            return
+        lx = 0.0
+        ly = 0.0
+        if "DPAD_LEFT" in self._pressed_buttons:
+            lx -= 1.0
+        if "DPAD_RIGHT" in self._pressed_buttons:
+            lx += 1.0
+        if "DPAD_UP" in self._pressed_buttons:
+            ly += 1.0
+        if "DPAD_DOWN" in self._pressed_buttons:
+            ly -= 1.0
+        try:
+            self.gamepad.left_joystick_float(x_value_float=lx, y_value_float=ly)
+        except Exception:
+            pass
 
     def try_auto_install_and_reinit(self, status_callback=None) -> bool:
         """ViGEmBus 자동 설치 후 가상 패드 재생성을 시도합니다."""
@@ -360,6 +403,8 @@ class VirtualGamepadManager:
                     return
                 self._pressed_buttons.discard(xbox_button_name)
                 self.gamepad.release_button(button=btn)
+
+            self._update_joystick_axes()
             self.gamepad.update()
 
     def sync_pressed_buttons(self, active_button_names: set):
@@ -396,7 +441,9 @@ class VirtualGamepadManager:
                         self._pressed_buttons.add(btn_name)
                         changed = True
 
-            if changed:
+            if changed or ("DPAD_LEFT" in active_button_names or "DPAD_RIGHT" in active_button_names
+                           or "DPAD_UP" in active_button_names or "DPAD_DOWN" in active_button_names):
+                self._update_joystick_axes()
                 self.gamepad.update()
 
     def release_all(self):
@@ -411,6 +458,7 @@ class VirtualGamepadManager:
             if self.gamepad and self._pressed_buttons:
                 self._pressed_buttons.clear()
                 self.gamepad.reset()
+                self._update_joystick_axes()
                 self.gamepad.update()
 
     def cleanup(self):

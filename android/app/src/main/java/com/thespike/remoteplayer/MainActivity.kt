@@ -47,12 +47,19 @@ class MainActivity : ComponentActivity() {
                 val errorMsg by signalingClient.errorMsg.collectAsState()
 
                 val currentHostIp = gameStartedHostIp
+                val currentHostLocalIp by signalingClient.hostLocalIp.collectAsState()
+                val currentRoomId by signalingClient.currentRoomId.collectAsState()
 
                 when {
                     // 1. 스트리밍 및 원격 플레이 화면
                     currentHostIp != null -> {
-                        val sender = remember(currentHostIp) {
-                            InputSender(hostIp = currentHostIp, port = 47990).also {
+                        val sender = remember(currentHostIp, currentHostLocalIp, currentRoomId) {
+                            InputSender(
+                                hostIp = currentHostIp,
+                                port = 47990,
+                                hostLocalIp = currentHostLocalIp,
+                                roomId = currentRoomId
+                            ).also {
                                 activeInputSender = it
                             }
                         }
@@ -110,21 +117,23 @@ class MainActivity : ComponentActivity() {
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val sender = activeInputSender
-        if (sender != null && isGamepadEvent(event.source)) {
+        if (sender != null && isGamepadKeyEvent(event)) {
             val isDown = event.action == KeyEvent.ACTION_DOWN
             val buttonFlag = when (event.keyCode) {
                 KeyEvent.KEYCODE_DPAD_LEFT -> SpikeButtons.LEFT
                 KeyEvent.KEYCODE_DPAD_RIGHT -> SpikeButtons.RIGHT
                 KeyEvent.KEYCODE_DPAD_UP -> SpikeButtons.UP
                 KeyEvent.KEYCODE_DPAD_DOWN -> SpikeButtons.DOWN
-                // A / R1 버튼 -> 스파이크 / 점프
-                KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_R1 -> SpikeButtons.SPIKE
-                // X / L1 버튼 -> 리시브 / 다이빙
-                KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_L1 -> SpikeButtons.RECEIVE
-                // B 버튼 -> 토스
-                KeyEvent.KEYCODE_BUTTON_B -> SpikeButtons.TOSS
-                // Y 버튼 -> 블로킹
-                KeyEvent.KEYCODE_BUTTON_Y -> SpikeButtons.BLOCK
+                // A / R1 / R2 버튼 -> 스파이크
+                KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_BUTTON_R2 -> SpikeButtons.SPIKE
+                // X / L1 / L2 버튼 -> 리시브
+                KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_L2 -> SpikeButtons.RECEIVE
+                // B 버튼 -> 블로킹
+                KeyEvent.KEYCODE_BUTTON_B -> SpikeButtons.BLOCK
+                // Y 버튼 -> 슬라이딩
+                KeyEvent.KEYCODE_BUTTON_Y -> SpikeButtons.SLIDE
+                // Start / Select -> 일시정지 (PAUSE)
+                KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_SELECT -> SpikeButtons.PAUSE
                 else -> 0
             }
 
@@ -141,7 +150,7 @@ class MainActivity : ComponentActivity() {
      */
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         val sender = activeInputSender
-        if (sender != null && isGamepadEvent(event.source) && event.action == MotionEvent.ACTION_MOVE) {
+        if (sender != null && isJoystickMotionEvent(event.source) && event.action == MotionEvent.ACTION_MOVE) {
             val axisX = event.getAxisValue(MotionEvent.AXIS_X)
             val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
             val axisY = event.getAxisValue(MotionEvent.AXIS_Y)
@@ -159,10 +168,29 @@ class MainActivity : ComponentActivity() {
         return super.dispatchGenericMotionEvent(event)
     }
 
-    private fun isGamepadEvent(source: Int): Boolean {
-        return (source and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
-               (source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK ||
-               (source and InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD
+    private fun isGamepadKeyEvent(event: KeyEvent): Boolean {
+        val src = event.source
+        if ((src and InputDevice.SOURCE_GAMEPAD) != 0 ||
+            (src and InputDevice.SOURCE_JOYSTICK) != 0 ||
+            (src and InputDevice.SOURCE_DPAD) != 0) {
+            return true
+        }
+        if (KeyEvent.isGamepadButton(event.keyCode)) return true
+        return event.keyCode in intArrayOf(
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B,
+            KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_Y,
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1,
+            KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_BUTTON_R2,
+            KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_SELECT
+        )
+    }
+
+    private fun isJoystickMotionEvent(source: Int): Boolean {
+        return (source and InputDevice.SOURCE_CLASS_JOYSTICK) != 0 ||
+               (source and InputDevice.SOURCE_JOYSTICK) != 0 ||
+               (source and InputDevice.SOURCE_GAMEPAD) != 0
     }
 
     private fun hideSystemBars() {

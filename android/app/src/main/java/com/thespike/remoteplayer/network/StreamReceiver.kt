@@ -174,7 +174,26 @@ class StreamReceiver(
                     _statusMessage.value = "연결 성공! (${if (isRelay) "OCI 릴레이" else "P2P 직결"}) 비디오 수신 중..."
 
                     while (isActive) {
-                        val frameSize = input.readInt()
+                        var frameSize = input.readInt()
+                        if (frameSize <= 0 || frameSize > 5 * 1024 * 1024) {
+                            break
+                        }
+
+                        // [초저지연 패스트포워드: 지연 누적 원천 차단]
+                        // Wi-Fi 네트워크 지터로 인해 소켓 버퍼에 이미 후속 프레임이 대기 중인 경우,
+                        // 낡은 프레임을 즉시 폐기하고 최신 프레임으로 직행하여 누적 딜레이를 0ms로 유지!
+                        while (input.available() >= frameSize + 4) {
+                            var skipped = 0
+                            while (skipped < frameSize) {
+                                val n = input.skipBytes(frameSize - skipped)
+                                if (n <= 0) break
+                                skipped += n
+                            }
+                            frameSize = input.readInt()
+                            if (frameSize <= 0 || frameSize > 5 * 1024 * 1024) {
+                                break
+                            }
+                        }
                         if (frameSize <= 0 || frameSize > 5 * 1024 * 1024) {
                             break
                         }
@@ -184,7 +203,7 @@ class StreamReceiver(
                         }
                         writePacket.size = frameSize
 
-                        // 소켓에서 페이로드를 끝까지 읽음 (렌더 스레드와 절대 겹치지 않는 독립 버퍼)
+                        // 소켓에서 최신 페이로드를 읽음
                         input.readFully(writePacket.data, 0, frameSize)
 
                         // 최신 프레임을 홀더에 등록하고, 만약 아직 소비되지 않은 이전 프레임이 있었다면 즉시 회수하여 재사용!

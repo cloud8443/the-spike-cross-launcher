@@ -74,26 +74,26 @@ def _detect_low_end_pc() -> tuple[bool, int, float]:
 class ScreenStreamer:
     """호스트 게임 화면 캡처 및 실시간 네트워크 송출 서버 (저사양 PC 메모리/CPU 극한 최적화 지원)."""
 
-    # 성능 프로파일 프리셋 정의
+    # 성능 프로파일 프리셋 정의 (고화질 HD 60FPS 표준 적용)
     PROFILES = {
         "low": {
-            "name": "⚡ 초경량 (저사양 PC 최적)",
-            "max_width": 854,       # 480p (픽셀 수 720p 대비 55% 감소)
-            "jpeg_quality": 52,     # 프레임당 15~22KB 초경량 압축
-            "default_fps": 40,      # 2코어 CPU에서 게임 프레임을 방해하지 않는 최적 FPS
-            "max_fps_cap": 45,      # 과부하 방지를 위한 최대 FPS 상한선
-        },
-        "balanced": {
-            "name": "🌟 균형 (일반 PC)",
+            "name": "⚡ 일반 (960x540)",
             "max_width": 960,       # 540p (qHD)
-            "jpeg_quality": 60,
+            "jpeg_quality": 75,
             "default_fps": 60,
             "max_fps_cap": 60,
         },
+        "balanced": {
+            "name": "🌟 고화질 HD (1280x720 / 기본 권장)",
+            "max_width": 1280,      # 720p (HD) - 텍스트 및 배구공 궤적 선명
+            "jpeg_quality": 82,     # 고화질 압축 (아티팩트 제거)
+            "default_fps": 60,      # 부드러운 60 FPS
+            "max_fps_cap": 60,
+        },
         "high": {
-            "name": "🚀 고화질 (고사양 PC)",
-            "max_width": 1280,      # 720p (HD)
-            "jpeg_quality": 68,
+            "name": "🚀 초고화질 (1600x900)",
+            "max_width": 1600,      # 900p / 원본급 선명도
+            "jpeg_quality": 88,
             "default_fps": 60,
             "max_fps_cap": 120,
         }
@@ -103,9 +103,9 @@ class ScreenStreamer:
         self.port = port
         self.status_callback = status_callback or (lambda msg: None)
 
-        # 하드웨어 사양 자동 감지
+        # 하드웨어 사양 감지 및 고화질 HD(balanced) 기본 채택
         self.is_low_end_pc, self.cpu_count, self.ram_gb = _detect_low_end_pc()
-        self.performance_mode = "low" if self.is_low_end_pc else "balanced"
+        self.performance_mode = "balanced"  # 고화질 720p 60FPS 기본 적용
         profile = self.PROFILES[self.performance_mode]
 
         self.max_stream_width = profile["max_width"]
@@ -113,9 +113,6 @@ class ScreenStreamer:
         self.max_fps_cap = profile["max_fps_cap"]
 
         initial_fps = target_fps if target_fps is not None else profile["default_fps"]
-        if self.is_low_end_pc:
-            initial_fps = min(initial_fps, self.max_fps_cap)
-
         self.target_fps = max(24, min(120, int(initial_fps)))
         self.frame_interval = 1.0 / self.target_fps
 
@@ -188,26 +185,13 @@ class ScreenStreamer:
             self.status_callback(f"🪟 화면 공유 모드: [{title}] 단독 공유")
 
     def set_fps(self, fps: int):
-        """목표 스트리밍 FPS를 동적으로 변경 (저사양 PC에서는 CPU 과부하 방지를 위해 상한선 자동 조절)."""
+        """목표 스트리밍 FPS를 동적으로 변경 (초저지연 60 FPS 기본 보장)."""
         requested_fps = int(fps)
-        # 저사양 PC에서 60/120FPS를 요청하더라도 2코어 보호를 위해 프로파일 상한선 적용
-        if self.is_low_end_pc and self.performance_mode == "low" and requested_fps > self.max_fps_cap:
-            actual_fps = self.max_fps_cap
-            self.target_fps = actual_fps
-            self.frame_interval = 1.0 / actual_fps
-            logger.info(
-                f"⚡ 저사양 PC 보호 작동: 요청 {requested_fps} FPS -> 최적 {actual_fps} FPS로 자동 고정 "
-                f"(CPU {self.cpu_count}스레드 / RAM {self.ram_gb}GB)"
-            )
-            self.status_callback(
-                f"⚡ 저사양 PC 최적화 작동 중: 렉 방지를 위해 {actual_fps} FPS (480p 초경량)로 동작합니다."
-            )
-        else:
-            actual_fps = max(24, min(120, requested_fps))
-            self.target_fps = actual_fps
-            self.frame_interval = 1.0 / actual_fps
-            logger.info(f"⚡ 목표 스트리밍 FPS 변경: {actual_fps} FPS (프레임 간격: {self.frame_interval*1000:.2f}ms)")
-            self.status_callback(f"⚡ 화면 스트리밍 FPS가 {actual_fps} FPS로 변경되었습니다.")
+        actual_fps = max(24, min(120, requested_fps))
+        self.target_fps = actual_fps
+        self.frame_interval = 1.0 / actual_fps
+        logger.info(f"⚡ 목표 스트리밍 FPS 설정: {actual_fps} FPS (프레임 간격: {self.frame_interval*1000:.2f}ms)")
+        self.status_callback(f"⚡ 화면 스트리밍: {actual_fps} FPS ({self.max_stream_width}p HD)")
 
     def _get_process_name_by_pid(self, pid: int) -> str:
         """PID로 프로세스 실행 파일명 조회."""
@@ -486,39 +470,49 @@ class ScreenStreamer:
                 if width <= 16 or height <= 16:
                     left, top, width, height = d_left, d_top, d_width, d_height
 
-                # 캐시된 GDI 컨텍스트 재사용 (메모리 재할당 0)
-                self._ensure_gdi_resources(desktop_hwnd, width, height)
+                # 목표 해상도(기본 1280x720 HD) 계산
+                max_w = self.max_stream_width
+                if width > max_w:
+                    target_w = max_w
+                    target_h = max(1, int(height * (float(max_w) / width)))
+                else:
+                    target_w = width
+                    target_h = height
 
-                self._save_dc.BitBlt((0, 0), (width, height), self._mfc_dc, (left, top), win32con.SRCCOPY)
+                # 캐시된 GDI 컨텍스트 재사용 (타깃 해상도로 메모리 캐싱)
+                self._ensure_gdi_resources(desktop_hwnd, target_w, target_h)
+
+                if target_w == width and target_h == height:
+                    self._save_dc.BitBlt((0, 0), (width, height), self._mfc_dc, (left, top), win32con.SRCCOPY)
+                else:
+                    # GDI HALFTONE(양선형 안티앨리어싱) 초고속 하드웨어 다운스케일링
+                    try:
+                        ctypes.windll.gdi32.SetStretchBltMode(self._save_dc.GetSafeHdc(), 4)  # 4 = HALFTONE
+                        ctypes.windll.gdi32.SetBrushOrgEx(self._save_dc.GetSafeHdc(), 0, 0, None)
+                    except Exception:
+                        pass
+                    self._save_dc.StretchBlt((0, 0), (target_w, target_h), self._mfc_dc, (left, top), (width, height), win32con.SRCCOPY)
 
                 bmpstr = self._bitmap.GetBitmapBits(True)
                 img = Image.frombuffer(
                     'RGB',
-                    (width, height),
+                    (target_w, target_h),
                     bmpstr, 'raw', 'BGRX', 0, 1
                 )
-
-                # 목표 해상도(저사양 기본 854x480)로 초고속 NEAREST 다운스케일링
-                max_w = self.max_stream_width
-                if width > max_w:
-                    new_h = max(1, int(height * (float(max_w) / width)))
-                    # NEAREST는 BILINEAR 대비 CPU 연산량이 1/5 수준이며 텍스트 가독성이 높음
-                    img = img.resize((max_w, new_h), Image.Resampling.NEAREST)
-
                 return img
             except Exception as e:
                 self._release_gdi_resources()
                 return self._get_fallback_frame(f"화면 대기 중... ({e})")
 
     def _get_fallback_frame(self, text):
-        """화면 캡처 불가 시 전송할 대기 화면 프레임 반환."""
+        """화면 캡처 불가 시 전송할 대기 화면 프레임 반환 (720p HD 표준)."""
         if text not in self._fallback_cache:
             if len(self._fallback_cache) > 6:
                 self._fallback_cache.clear()
-            img = Image.new('RGB', (854, 480), color=(15, 17, 30))
+            img = Image.new('RGB', (1280, 720), color=(15, 17, 30))
             draw = ImageDraw.Draw(img)
-            draw.text((260, 210), "The Spike Cross - 원격 화면 대기 중", fill=(255, 255, 255))
-            draw.text((260, 245), text, fill=(150, 160, 180))
+            draw.text((450, 320), "The Spike Cross - 원격 화면 대기 중", fill=(255, 255, 255))
+            draw.text((450, 360), text, fill=(150, 160, 180))
             self._fallback_cache[text] = img
         return self._fallback_cache[text]
 
@@ -646,7 +640,7 @@ class ScreenStreamer:
                     frames_sent = 0
                     fps_timer = now
 
-                # 4. CPU 친화적 프레임 페이싱 (Busy-Wait 스핀락 완전 제거!)
+                # 4. CPU 친화적 초저지연 프레임 페이싱 (누적 지연 원천 차단)
                 target_interval = self.frame_interval
                 next_frame_time += target_interval
                 sleep_time = next_frame_time - time.perf_counter()
@@ -654,8 +648,7 @@ class ScreenStreamer:
                 if sleep_time > 0.001:
                     time.sleep(sleep_time)
                 else:
-                    # 캡처/인코딩이 프레임 간격보다 길어졌을 때에도 최소 1ms를 양보해 게임 렉(Stutter) 방지
-                    time.sleep(0.001)
+                    # 지연 발생 시 절대로 추가 슬립하지 않고 현재 시각과 즉시 재동기화 (누적 딜레이 제거)
                     if time.perf_counter() - next_frame_time > target_interval:
                         next_frame_time = time.perf_counter()
 

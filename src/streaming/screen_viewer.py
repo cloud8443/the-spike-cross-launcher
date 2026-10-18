@@ -14,7 +14,7 @@ import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QRect
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QKeyEvent, QColor, QFont, QFocusEvent
 
 logger = logging.getLogger("ScreenViewer")
@@ -193,7 +193,7 @@ class StreamReceiverThread(QObject):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)  # 저지연 버퍼 최적화
                 sock.settimeout(4.0)
                 sock.connect((self.host_ip, self.stream_port))
                 self._sock = sock
@@ -208,6 +208,11 @@ class StreamReceiverThread(QObject):
 
         fps_timer = time.perf_counter()
         frames_count = 0
+
+        # Windows 소켓 버퍼 검사용 ioctl 준비
+        ws2_32 = getattr(ctypes.windll, 'ws2_32', None) if hasattr(ctypes, 'windll') else None
+        FIONREAD = 0x4004667f
+        avail = ctypes.c_ulong(0)
 
         # 수신 버퍼 사전 할당 (재할당 방지)
         header_buf = bytearray(4)
@@ -224,14 +229,31 @@ class StreamReceiverThread(QObject):
                     logger.warning(f"비정상 프레임 크기 감지: {payload_len} bytes")
                     break
 
+                # 2. 초저지연 프레임 패스트포워드 (지연 누적 원천 제거)
+                # 소켓 버퍼에 후속 프레임 데이터가 이미 들어와 있는 경우,
+                # 낡은 프레임을 디코딩하지 않고 폐기한 뒤 가장 최신의 프레임으로 직행합니다.
+                if ws2_32 is not None:
+                    while self._running:
+                        ws2_32.ioctlsocket(self._sock.fileno(), FIONREAD, ctypes.byref(avail))
+                        if avail.value >= payload_len + 4:
+                            if not self._recv_into_exact(payload_buf, payload_len):
+                                break
+                            if not self._recv_into_exact(header_buf, 4):
+                                break
+                            payload_len = struct.unpack(">I", header_buf)[0]
+                            if payload_len <= 0 or payload_len > MAX_FRAME_SIZE:
+                                break
+                            continue
+                        break
+
                 if len(payload_buf) < payload_len:
                     payload_buf = bytearray(payload_len)
 
-                # 2. JPEG 데이터 Zero-Copy 수신
+                # 3. 최신 JPEG 데이터 Zero-Copy 수신
                 if not self._recv_into_exact(payload_buf, payload_len):
                     break
 
-                # 3. 백그라운드 스레드에서 즉시 QImage 디코딩 (GUI 스레드 병목 제거)
+                # 4. 백그라운드 스레드에서 즉시 QImage 디코딩 (GUI 스레드 병목 제거)
                 img = QImage()
                 if img.loadFromData(memoryview(payload_buf)[:payload_len], "JPEG"):
                     emit_needed = False
@@ -291,12 +313,11 @@ class StreamReceiverThread(QObject):
 
 
 class VideoDisplayWidget(QWidget):
-    """QPainter를 이용해 화면에 프레임을 비율 유지하며 초고속 렌더링하는 위젯."""
+    """QPainter를 이용해 화면에 프레임을 비율 유지하며 하드웨어 가속 초고속 렌더링하는 위젯."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_pixmap = None
-        self._scaled_pixmap = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet("background-color: #05060a;")
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
@@ -305,30 +326,27 @@ class VideoDisplayWidget(QWidget):
     def update_image(self, image: QImage):
         if image and not image.isNull():
             self.current_pixmap = QPixmap.fromImage(image)
-            self._rebuild_scaled_pixmap()
             self.update()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rebuild_scaled_pixmap()
-
-    def _rebuild_scaled_pixmap(self):
-        """새 프레임 수신 또는 창 리사이즈 시에만 스케일링 연산 수행."""
-        if self.current_pixmap and not self.current_pixmap.isNull() and not self.size().isEmpty():
-            self._scaled_pixmap = self.current_pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation
-            )
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#05060a"))
 
-        if self._scaled_pixmap and not self._scaled_pixmap.isNull():
-            x = (self.width() - self._scaled_pixmap.width()) // 2
-            y = (self.height() - self._scaled_pixmap.height()) // 2
-            painter.drawPixmap(x, y, self._scaled_pixmap)
+        if self.current_pixmap and not self.current_pixmap.isNull():
+            # 16:9 비율 유지 중앙 정렬 렌더링 (안티앨리어싱 부드러운 스케일링)
+            w = self.width()
+            h = self.height()
+            pix_w = self.current_pixmap.width()
+            pix_h = self.current_pixmap.height()
+
+            scale = min(w / pix_w, h / pix_h)
+            target_w = max(1, int(pix_w * scale))
+            target_h = max(1, int(pix_h * scale))
+            x = (w - target_w) // 2
+            y = (h - target_h) // 2
+
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawPixmap(QRect(x, y, target_w, target_h), self.current_pixmap)
         else:
             painter.setPen(QColor("#64748b"))
             painter.setFont(QFont("Malgun Gothic", 14))

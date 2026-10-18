@@ -13,11 +13,11 @@ class VideoSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.C
     @Volatile
     private var isSurfaceReady = false
     private val dstRect = Rect()
-    // 고속 렌더링을 위해 Anti-Aliasing과 Filter를 비활성화한 순수 블리팅 페인트
-    private val fastPaint = Paint().apply {
-        isFilterBitmap = false
-        isAntiAlias = false
-        isDither = false
+    // 하드웨어 가속 양선형 필터링 페인트 (모바일 고해상도 화면에서 깨끗하고 부드러운 720p 렌더링)
+    private val highQualityPaint = Paint().apply {
+        isFilterBitmap = true
+        isAntiAlias = true
+        isDither = true
     }
 
     init {
@@ -50,11 +50,23 @@ class VideoSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.C
         } ?: return
 
         try {
-            // 16:9 비율 유지 레터박스 계산 또는 전체화면 스케일링
-            if (dstRect.width() == 0 || dstRect.height() == 0) {
-                dstRect.set(0, 0, canvas.width, canvas.height)
+            val canvasW = canvas.width
+            val canvasH = canvas.height
+            val bitmapW = bitmap.width
+            val bitmapH = bitmap.height
+
+            if (bitmapW > 0 && bitmapH > 0 && canvasW > 0 && canvasH > 0) {
+                // 원본 16:9 화면비 유지 및 중앙 정렬 (화면 찌그러짐 원천 차단)
+                val scale = minOf(canvasW.toFloat() / bitmapW, canvasH.toFloat() / bitmapH)
+                val targetW = (bitmapW * scale).toInt()
+                val targetH = (bitmapH * scale).toInt()
+                val left = (canvasW - targetW) / 2
+                val top = (canvasH - targetH) / 2
+
+                dstRect.set(left, top, left + targetW, top + targetH)
+                canvas.drawColor(Color.BLACK)
+                canvas.drawBitmap(bitmap, null, dstRect, highQualityPaint)
             }
-            canvas.drawBitmap(bitmap, null, dstRect, fastPaint)
         } finally {
             try {
                 surfaceHolder.unlockCanvasAndPost(canvas)

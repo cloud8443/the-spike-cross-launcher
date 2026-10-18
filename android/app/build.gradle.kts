@@ -11,8 +11,8 @@ android {
         applicationId = "com.thespike.remoteplayer"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.4.1"
+        versionCode = 6
+        versionName = "1.4.2"
 
         vectorDrawables {
             useSupportLibrary = true

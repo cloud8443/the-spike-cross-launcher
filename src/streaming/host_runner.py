@@ -317,6 +317,9 @@ class HostRunner:
     def _bridge_sockets(self, local_sock: socket.socket, tunnel_sock: socket.socket):
         """로컬 스트리머(127.0.0.1:47998)의 비디오 프레임을 OCI 역방향 터널로 무지연 전송."""
         try:
+            local_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            tunnel_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            tunnel_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
             while self._running:
                 data = local_sock.recv(65536)
                 if not data:

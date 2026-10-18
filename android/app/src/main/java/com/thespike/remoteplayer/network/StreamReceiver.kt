@@ -152,16 +152,26 @@ class StreamReceiver(
                 attempt++
                 var socket: Socket? = null
                 try {
-                    _statusMessage.value = "호스트($hostIp:$port) 스트림 연결 시도 중... (#$attempt)"
+                    val targetConnectIp = if (attempt % 2 == 1 && hostIp.isNotBlank() && hostIp != "127.0.0.1" && hostIp != "146.56.101.107") {
+                        hostIp
+                    } else {
+                        "146.56.101.107"
+                    }
+                    val isRelay = targetConnectIp == "146.56.101.107"
+                    _statusMessage.value = if (isRelay) {
+                        "OCI 고속 릴레이($targetConnectIp:$port) 스트림 연결 중..."
+                    } else {
+                        "호스트($targetConnectIp:$port) 직결 스트림 연결 시도 중... (#$attempt)"
+                    }
 
                     socket = Socket()
                     socket.tcpNoDelay = true
                     socket.soTimeout = 4000
                     socket.receiveBufferSize = 64 * 1024 // 480p 초경량 프레임에 맞춘 저지연 수신 버퍼
-                    socket.connect(InetSocketAddress(hostIp, port), 3500)
+                    socket.connect(InetSocketAddress(targetConnectIp, port), if (isRelay) 4000 else 2000)
 
                     val input = DataInputStream(socket.getInputStream())
-                    _statusMessage.value = "연결 성공! 첫 비디오 프레임 수신 대기 중..."
+                    _statusMessage.value = "연결 성공! (${if (isRelay) "OCI 릴레이" else "P2P 직결"}) 비디오 수신 중..."
 
                     while (isActive) {
                         val frameSize = input.readInt()

@@ -58,9 +58,22 @@ fun LobbyScreen(
                     Text(
                         text = "THE SPIKE REMOTE 2P",
                         color = Color.White,
-                        fontSize = 24.sp,
+                        fontSize = 22.sp,
                         fontWeight = FontWeight.ExtraBold
                     )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Surface(
+                        color = Color(0xFF2E7D32),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "v1.4.0 WAN",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(

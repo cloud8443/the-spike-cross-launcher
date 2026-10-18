@@ -34,11 +34,14 @@ object SpikeButtons {
  * 3. 호스트로부터 punch/punch_ack 수신 시 직결 P2P 타겟으로 자동 핫스왑
  */
 class InputSender(
-    private val hostPublicIp: String,         // 호스트 공인 IP (STUN 실패 시 OCI IP)
-    private val hostLocalIp: String? = null,  // 호스트 사설 LAN IP (같은 와이파이 직결용)
-    private val hostPort: Int = 47990,
-    private val roomId: String = "default"
+    val hostIp: String,
+    val port: Int = 47990,
+    val hostLocalIp: String? = null,
+    val roomId: String = "default"
 ) {
+    val hostPublicIp: String get() = hostIp
+    val hostPort: Int get() = port
+
     companion object {
         const val OCI_RELAY_IP = "146.56.101.107"
         const val OCI_UDP_PORT = 47990
@@ -70,7 +73,10 @@ class InputSender(
                 // 초기 타겟: 같은 서브넷이면 LAN 직결, 아니면 OCI 릴레이로 즉시 시작
                 val myLocalIp = getDeviceLocalIp()
                 if (!hostLocalIp.isNullOrBlank() && isSameLan(myLocalIp, hostLocalIp)) {
-                    activeTarget.set(Pair(InetAddress.getByName(hostLocalIp), hostPort))
+                    activeTarget.set(Pair(InetAddress.getByName(hostLocalIp), port))
+                    p2pConnected = true
+                } else if (!hostIp.isNullOrBlank() && isSameLan(myLocalIp, hostIp)) {
+                    activeTarget.set(Pair(InetAddress.getByName(hostIp), port))
                     p2pConnected = true
                 } else {
                     activeTarget.set(Pair(InetAddress.getByName(OCI_RELAY_IP), OCI_UDP_PORT))
@@ -230,10 +236,10 @@ class InputSender(
                     }.toString().toByteArray(Charsets.UTF_8)
 
                     if (!hostLocalIp.isNullOrBlank()) {
-                        socket.send(DatagramPacket(punchBytes, punchBytes.size, InetAddress.getByName(hostLocalIp), hostPort))
+                        socket.send(DatagramPacket(punchBytes, punchBytes.size, InetAddress.getByName(hostLocalIp), port))
                     }
-                    if (hostPublicIp.isNotBlank() && hostPublicIp != OCI_RELAY_IP) {
-                        socket.send(DatagramPacket(punchBytes, punchBytes.size, InetAddress.getByName(hostPublicIp), hostPort))
+                    if (hostIp.isNotBlank() && hostIp != OCI_RELAY_IP) {
+                        socket.send(DatagramPacket(punchBytes, punchBytes.size, InetAddress.getByName(hostIp), port))
                     }
                 }
             } catch (_: Exception) {}
@@ -253,11 +259,10 @@ class InputSender(
 
                 when (json.optString("type")) {
                     "peer_info" -> {
-                        // OCI 서버가 호스트 좌표를 알려줌 -> 즉시 홀 펀칭 패킷 발사
                         val pubIp = json.optString("public_ip")
-                        val pubPort = json.optInt("public_port", hostPort)
+                        val pubPort = json.optInt("public_port", port)
                         val locIp = json.optString("local_ip")
-                        val locPort = json.optInt("local_port", hostPort)
+                        val locPort = json.optInt("local_port", port)
 
                         val punchBytes = JSONObject().apply {
                             put("type", "punch")
@@ -274,7 +279,6 @@ class InputSender(
                     "punch", "punch_ack" -> {
                         val senderIp = packet.address.hostAddress ?: ""
                         if (senderIp != OCI_RELAY_IP) {
-                            // 호스트로부터 직접 패킷 수신 성공 -> 즉시 직결 P2P 타겟으로 핫스왑!
                             if (!p2pConnected) {
                                 p2pConnected = true
                                 activeTarget.set(Pair(packet.address, packet.port))

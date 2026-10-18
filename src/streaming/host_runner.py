@@ -3,8 +3,8 @@ host_runner.py
 호스트(Host) 역할이 확정되었을 때 실행되는 세션 오케스트레이터.
 1. 가상 Xbox 360 2P 패드 생성 (ViGEmBus) - 미설치 시 자동 설치 유도 또는 키보드 폴백으로 무중단 진행
 2. 스팀 게임 자동 실행
-3. 게스트 입력 수신용 UDP 서버 가동 (패킷 유실 복구 및 Watchdog 포함)
-4. 실시간 화면 공유 서버 및 Sunshine 스트리밍 데몬 관리
+3. 게스트 입력 수신용 UDP 서버 가동 (UDP 홀 펀칭 + OCI STUN 하이브리드 포함)
+4. 실시간 화면 공유 서버 및 OCI 역방향 비디오 터널 관리
 """
 
 import json
@@ -26,6 +26,11 @@ STEAM_APP_ID = "3983810"
 INPUT_UDP_PORT = 47990  # 게스트로부터 입력을 받을 UDP 포트
 STREAM_PORT = 47998     # 게스트에게 비디오 화면을 송출할 TCP 포트
 
+# OCI 하이브리드 릴레이 서버 정보
+OCI_SERVER_IP = "146.56.101.107"
+OCI_UDP_PORT = 47990
+OCI_TUNNEL_PORT = 47999
+
 
 def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -34,24 +39,33 @@ def resource_path(relative_path):
 
 
 class HostRunner:
-    """호스트 세션 전체를 관리하는 컨트롤러."""
+    """호스트 세션 전체를 관리하는 컨트롤러 (인터넷 P2P 홀펀칭 + OCI 역방향 스트림 터널 내장)."""
 
-    def __init__(self, status_callback=None, driver_prompt_callback=None):
+    def __init__(self, status_callback=None, driver_prompt_callback=None, room_id="default"):
         """
         :param status_callback: 상태 로그 출력 콜백 (str -> None)
         :param driver_prompt_callback: ViGEmBus 미설치 시 사용자에게 자동 설치 여부를 묻는 콜백 (() -> bool)
+        :param room_id: 방 ID (홀 펀칭 STUN 등록에 사용)
         """
         self.gamepad_manager = VirtualGamepadManager()
         self.keymap_manager = KeymapManager()
         self.status_callback = status_callback or (lambda msg: None)
         self.driver_prompt_callback = driver_prompt_callback
+        self.room_id = str(room_id)
+
         self._input_thread = None
+        self._stun_thread = None
+        self._tunnel_thread = None
         self._running = False
         self._udp_sock = None
         self._sunshine_proc = None
+
         self.local_ip = self._get_local_ip()
+        self.public_ip = OCI_SERVER_IP  # STUN 조회 전 안전한 기본값
         self.input_port = INPUT_UDP_PORT
         self.stream_port = STREAM_PORT
+        self._peer_candidates = set()  # 게스트 홀 펀칭 대상 (공인/사설 IP, Port)
+
         self.screen_streamer = ScreenStreamer(
             port=self.stream_port,
             status_callback=self.status_callback,
@@ -104,7 +118,7 @@ class HostRunner:
         else:
             self.status_callback("✅ 가상 Xbox 360 패드 (2P) 준비 완료")
 
-        # 2. UDP 입력 수신 서버 시작
+        # 2. UDP 입력 수신 서버 + STUN + 홀 펀칭 시작
         self.status_callback("📡 입력 수신 서버를 시작하는 중...")
         try:
             self._start_input_receiver()
@@ -135,9 +149,10 @@ class HostRunner:
         return True, "호스트 세션 준비 완료"
 
     def _start_input_receiver(self):
-        """게스트 입력 패킷을 수신하는 UDP 서버를 백그라운드 스레드로 가동."""
+        """게스트 입력 패킷 수신 + OCI STUN 등록 및 UDP 홀 펀칭 가동."""
         self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
         self._udp_sock.settimeout(0.5)
         self._udp_sock.bind(("0.0.0.0", self.input_port))
 
@@ -148,7 +163,11 @@ class HostRunner:
 
             while self._running:
                 try:
-                    data, _ = self._udp_sock.recvfrom(512)
+                    data, addr = self._udp_sock.recvfrom(512)
+                    # P2P 제어 패킷인지 먼저 확인
+                    if self._handle_p2p_control_packet(data, addr):
+                        continue
+
                     last_packet_time = time.perf_counter()
                     watchdog_released = False
                     self._process_input_packet(data)
@@ -164,6 +183,153 @@ class HostRunner:
 
         self._input_thread = threading.Thread(target=receiver_loop, daemon=True)
         self._input_thread.start()
+
+        # STUN 하트비트 및 홀 펀칭 유지 스레드 시작
+        self._stun_thread = threading.Thread(target=self._stun_and_punch_loop, daemon=True)
+        self._stun_thread.start()
+
+        # 인터넷 게스트를 위한 비디오 역방향 터널 스레드 시작
+        self._tunnel_thread = threading.Thread(target=self._video_reverse_tunnel_loop, daemon=True)
+        self._tunnel_thread.start()
+
+    def _handle_p2p_control_packet(self, raw_data: bytes, addr: tuple) -> bool:
+        """STUN 및 UDP 홀 펀칭 제어 패킷을 처리. 제어 패킷이면 True 반환."""
+        if (b'"stun_' not in raw_data and b'"peer_info"' not in raw_data
+                and b'"punch"' not in raw_data and b'"punch_ack"' not in raw_data):
+            return False
+        try:
+            pkt = json.loads(raw_data.decode("utf-8"))
+            pkt_type = pkt.get("type")
+
+            if pkt_type == "stun_ack":
+                new_pub_ip = pkt.get("public_ip", self.public_ip)
+                if new_pub_ip != self.public_ip:
+                    self.public_ip = new_pub_ip
+                    logger.info(f"🌐 공인 IP 확인됨: {self.public_ip}")
+                return True
+
+            elif pkt_type == "peer_info":
+                # OCI 서버로부터 게스트의 공인/사설 좌표를 수신 -> 즉시 홀 펀칭 패킷 발사!
+                g_pub = (pkt.get("public_ip"), int(pkt.get("public_port", 0)))
+                g_loc = (pkt.get("local_ip"), int(pkt.get("local_port", 0)))
+                for target in (g_pub, g_loc):
+                    if target[0] and target[1] > 0:
+                        self._peer_candidates.add(target)
+                        self._send_udp_json({"type": "punch", "room_id": self.room_id}, target)
+                logger.info(f"🚀 게스트 홀 펀칭 시작: 공인={g_pub}, 사설={g_loc}")
+                return True
+
+            elif pkt_type == "punch":
+                # 게스트의 홀 펀칭 패킷이 직접 도달함 -> 즉시 punch_ack 응답하여 P2P 직결 완성!
+                self._peer_candidates.add(addr)
+                self._send_udp_json({"type": "punch_ack", "room_id": self.room_id}, addr)
+                logger.info(f"⚡ 홀 펀칭 수신! 게스트 직결 주소: {addr}")
+                return True
+
+            elif pkt_type == "punch_ack":
+                return True
+
+        except Exception:
+            pass
+        return False
+
+    def _send_udp_json(self, payload: dict, target_addr: tuple):
+        if not self._udp_sock or not self._running:
+            return
+        try:
+            self._udp_sock.sendto(json.dumps(payload).encode("utf-8"), target_addr)
+        except Exception:
+            pass
+
+    def _stun_and_punch_loop(self):
+        """주기적으로 OCI 서버와 게스트 후보 주소에 UDP NAT 매핑 유지 패킷 전송."""
+        while self._running:
+            # 1. OCI STUN & 릴레이 서버에 호스트 생존 신고 (NAT 포트 유지)
+            self._send_udp_json({
+                "type": "stun_host",
+                "room_id": self.room_id,
+                "local_ip": self.local_ip,
+                "local_port": self.input_port
+            }, (OCI_SERVER_IP, OCI_UDP_PORT))
+
+            # 2. 게스트 후보 주소들로 홀 펀칭 패킷 전송 (방화벽 홀 유지)
+            for peer_addr in list(self._peer_candidates):
+                self._send_udp_json({"type": "punch", "room_id": self.room_id}, peer_addr)
+
+            time.sleep(2.0)
+
+    def _video_reverse_tunnel_loop(self):
+        """
+        외부 네트워크의 게스트가 공유기 포트포워딩 없이도 화면을 수신할 수 있도록
+        OCI 서버(47999)에 대기 터널을 유지하고, 게스트 접속("START") 시 로컬 47998 스트리머와 연결.
+        """
+        while self._running:
+            tunnel_sock = None
+            try:
+                tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                tunnel_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                tunnel_sock.settimeout(10.0)
+                tunnel_sock.connect((OCI_SERVER_IP, OCI_TUNNEL_PORT))
+
+                # 호스트 터널 등록
+                tunnel_sock.sendall(f"HOST:{self.room_id}\n".encode("utf-8"))
+                self.status_callback("🌐 인터넷 게스트용 비디오 터널 대기 중 (OCI 서버 연결됨)...")
+
+                # 게스트가 접속할 때까지 대기 (블로킹)
+                tunnel_sock.settimeout(None)
+                cmd = b""
+                while self._running and b"\n" not in cmd:
+                    chunk = tunnel_sock.recv(64)
+                    if not chunk:
+                        break
+                    cmd += chunk
+
+                if not self._running or not cmd.startswith(b"START"):
+                    try:
+                        tunnel_sock.close()
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+                    continue
+
+                # 게스트가 OCI 47998에 접속함! -> 즉시 로컬 ScreenStreamer(127.0.0.1:47998)와 브릿징
+                self.status_callback("🟢 인터넷 게스트 비디오 연결됨! OCI 터널 통해 화면 중계 중...")
+                local_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                local_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                local_sock.connect(("127.0.0.1", self.stream_port))
+
+                threading.Thread(
+                    target=self._bridge_sockets,
+                    args=(local_sock, tunnel_sock),
+                    daemon=True
+                ).start()
+
+            except Exception as e:
+                if tunnel_sock:
+                    try:
+                        tunnel_sock.close()
+                    except Exception:
+                        pass
+                if self._running:
+                    logger.debug(f"비디오 역방향 터널 재연결 중: {e}")
+                    time.sleep(3.0)
+
+    def _bridge_sockets(self, local_sock: socket.socket, tunnel_sock: socket.socket):
+        """로컬 스트리머(127.0.0.1:47998)의 비디오 프레임을 OCI 역방향 터널로 무지연 전송."""
+        try:
+            while self._running:
+                data = local_sock.recv(65536)
+                if not data:
+                    break
+                tunnel_sock.sendall(data)
+        except Exception:
+            pass
+        finally:
+            for s in (local_sock, tunnel_sock):
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
     def _process_input_packet(self, raw_data):
         """게스트 입력 UDP 패킷을 파싱하여 가상 패드(또는 키보드 폴백)에 주입."""
@@ -227,7 +393,11 @@ class HostRunner:
             except Exception as e:
                 self.status_callback(f"⚠️ Sunshine 시작 실패 (내장 스트리머 동작 중): {e}")
         else:
-            self.status_callback("ℹ️ 내장 초저지연(120 FPS) 화면 공유 서버로 동작합니다.")
+            self.status_callback("ℹ️ 내장 초저지연(60 FPS) 화면 공유 서버로 동작합니다.")
+
+    def set_room_id(self, room_id: str):
+        """방 ID를 업데이트합니다 (STUN/홀 펀칭 그룹 식별자)."""
+        self.room_id = str(room_id)
 
     def set_target_window(self, hwnd=None):
         """스트리밍 화면 공유 대상을 지정 (None: 자동 감지, 0: 전체 화면, >0: 특정 창)."""
@@ -240,7 +410,9 @@ class HostRunner:
     def get_connection_info(self):
         """게스트에게 전달할 연결 정보를 반환."""
         return {
-            "host_ip": self.local_ip,
+            "host_ip": self.public_ip,
+            "local_ip": self.local_ip,
+            "relay_ip": OCI_SERVER_IP,
             "input_port": self.input_port,
             "stream_port": self.stream_port,
             "sunshine_available": self._sunshine_proc is not None,

@@ -86,21 +86,12 @@ class GuestRunner:
 
     def get_best_stream_endpoint(self, stream_port=47998):
         """
-        내장 스트리밍 뷰어(TCP)가 접속할 최적의 (IP, Port)를 반환.
-        1순위: 호스트 LAN IP (0.25초 내 응답 시)
-        2순위: OCI 무지연 비디오 스플라이서 (146.56.101.107:47998)
+        내장 스트리밍 뷰어(TCP)가 접속할 기본 (IP, Port)를 반환.
+        (사전 더미 소켓 연결로 인해 호스트 ScreenStreamer의 활성 소켓이 끊기는 현상을 방지하고,
+        실제 연결 시도는 StreamReceiverThread에서 LAN 우선 -> OCI 릴레이 폴백으로 직접 수행합니다.)
         """
-        for candidate_ip in (self.host_local_ip, self.host_ip):
-            if not candidate_ip or candidate_ip in ("", "127.0.0.1", OCI_SERVER_IP):
-                continue
-            try:
-                with socket.create_connection((candidate_ip, stream_port), timeout=0.25):
-                    logger.info(f"⚡ 비디오 스트림 LAN/직결 경로 확인됨: {candidate_ip}:{stream_port}")
-                    return candidate_ip, stream_port
-            except Exception:
-                pass
-
-        logger.info(f"🌐 비디오 스트림 OCI 고속 릴레이 경로 사용: {OCI_SERVER_IP}:{OCI_STREAM_PORT}")
+        if self._is_same_lan(self.local_ip, self.host_local_ip):
+            return self.host_local_ip, stream_port
         return OCI_SERVER_IP, OCI_STREAM_PORT
 
     def start_session(self):

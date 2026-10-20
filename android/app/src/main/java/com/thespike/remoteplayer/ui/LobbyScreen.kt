@@ -67,7 +67,7 @@ fun LobbyScreen(
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = "v1.4.1 Pad Support",
+                            text = "v1.4.3 HD Zero-Lag",
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,

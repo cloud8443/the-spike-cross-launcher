@@ -66,6 +66,10 @@ class HostRunner:
         self.stream_port = STREAM_PORT
         self._peer_candidates = set()  # 게스트 홀 펀칭 대상 (공인/사설 IP, Port)
 
+        # 키보드 입력 상태와 게임패드/모바일 비트마스크 상태를 분리 추적 (sync_keys가 패드 입력을 덮어쓰는 버그 방지)
+        self._kb_buttons = set()
+        self._pad_buttons = set()
+
         self.screen_streamer = ScreenStreamer(
             port=self.stream_port,
             status_callback=self.status_callback,
@@ -174,6 +178,8 @@ class HostRunner:
                 except socket.timeout:
                     # 2초 이상 게스트로부터 아무런 패킷이 없으면 모든 버튼 강제 해제 (무한 눌림 방어)
                     if not watchdog_released and (time.perf_counter() - last_packet_time > 2.0):
+                        self._kb_buttons.clear()
+                        self._pad_buttons.clear()
                         self.gamepad_manager.release_all()
                         watchdog_released = True
                     continue
@@ -292,17 +298,8 @@ class HostRunner:
                     time.sleep(1.0)
                     continue
 
-                # 게스트가 OCI 47998에 접속함! -> 즉시 로컬 ScreenStreamer(127.0.0.1:47998)와 브릿징
-                self.status_callback("🟢 인터넷 게스트 비디오 연결됨! OCI 터널 통해 화면 중계 중...")
-                local_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                local_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                local_sock.connect(("127.0.0.1", self.stream_port))
-
-                threading.Thread(
-                    target=self._bridge_sockets,
-                    args=(local_sock, tunnel_sock),
-                    daemon=True
-                ).start()
+                # 게스트가 OCI 47998에 접속함! -> 루프백 브릿지 없이 ScreenStreamer에 소켓 직접 주입 (지연 0ms)
+                self.screen_streamer.attach_client_socket(tunnel_sock, "OCI 고속 릴레이")
 
             except Exception as e:
                 if tunnel_sock:
@@ -312,27 +309,7 @@ class HostRunner:
                         pass
                 if self._running:
                     logger.debug(f"비디오 역방향 터널 재연결 중: {e}")
-                    time.sleep(3.0)
-
-    def _bridge_sockets(self, local_sock: socket.socket, tunnel_sock: socket.socket):
-        """로컬 스트리머(127.0.0.1:47998)의 비디오 프레임을 OCI 역방향 터널로 무지연 전송."""
-        try:
-            local_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            tunnel_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            tunnel_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
-            while self._running:
-                data = local_sock.recv(65536)
-                if not data:
-                    break
-                tunnel_sock.sendall(data)
-        except Exception:
-            pass
-        finally:
-            for s in (local_sock, tunnel_sock):
-                try:
-                    s.close()
-                except Exception:
-                    pass
+                    time.sleep(2.0)
 
     def _process_input_packet(self, raw_data):
         """게스트 입력 UDP 패킷을 파싱하여 가상 패드(또는 키보드 폴백)에 주입."""
@@ -345,9 +322,15 @@ class HostRunner:
                 is_pressed = bool(pkt.get("pressed", False))
                 xbox_btn = self.keymap_manager.key_to_xbox_button(key_name)
                 if xbox_btn:
-                    self.gamepad_manager.update_input(xbox_btn, is_pressed)
+                    if is_pressed:
+                        self._kb_buttons.add(xbox_btn)
+                    else:
+                        self._kb_buttons.discard(xbox_btn)
+                    self.gamepad_manager.sync_pressed_buttons(self._kb_buttons | self._pad_buttons)
 
             elif pkt_type == "release_all":
+                self._kb_buttons.clear()
+                self._pad_buttons.clear()
                 self.gamepad_manager.release_all()
 
             elif pkt_type == "sync_keys":
@@ -357,7 +340,9 @@ class HostRunner:
                     for k in active_keys
                 }
                 active_xbox_btns.discard(None)
-                self.gamepad_manager.sync_pressed_buttons(active_xbox_btns)
+                self._kb_buttons = active_xbox_btns
+                # 키보드 동기화 시 물리 게임패드(_pad_buttons) 눌림 상태가 초기화되지 않도록 병합 반영
+                self.gamepad_manager.sync_pressed_buttons(self._kb_buttons | self._pad_buttons)
 
             elif pkt_type == "set_fps":
                 fps = int(pkt.get("fps", 120))
@@ -379,7 +364,8 @@ class HostRunner:
                 if pkt.get("back") or pkt.get("select"): active_xbox_btns.add("BACK")
                 if pkt.get("lb"): active_xbox_btns.add("LB")
                 if pkt.get("rb"): active_xbox_btns.add("RB")
-                self.gamepad_manager.sync_pressed_buttons(active_xbox_btns)
+                self._pad_buttons = active_xbox_btns
+                self.gamepad_manager.sync_pressed_buttons(self._kb_buttons | self._pad_buttons)
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.debug(f"입력 패킷 파싱 오류: {e}")

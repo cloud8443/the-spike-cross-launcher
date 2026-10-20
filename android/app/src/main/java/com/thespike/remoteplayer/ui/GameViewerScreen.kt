@@ -33,14 +33,16 @@ import com.thespike.remoteplayer.network.StreamReceiver
 @Composable
 fun GameViewerScreen(
     hostIp: String,
+    hostLocalIp: String = hostIp,
     inputSender: InputSender,
     onExitGame: () -> Unit
 ) {
     val context = LocalContext.current
     val surfaceView = remember { VideoSurfaceView(context) }
-    val streamReceiver = remember(hostIp) {
+    val streamReceiver = remember(hostIp, hostLocalIp) {
         StreamReceiver(
             hostIp = hostIp,
+            hostLocalIp = hostLocalIp,
             port = 47998,
             onFrameDecoded = { bitmap -> surfaceView.renderFrame(bitmap) }
         )

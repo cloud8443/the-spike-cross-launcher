@@ -17,6 +17,14 @@ import time
 try:
     import ctypes
     from ctypes import wintypes
+    # Windows DPI 스케일링(125%, 150% 등)으로 인한 캡처 해상도 저하/블러 현상 원천 방지
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
     winmm = ctypes.WinDLL('winmm')
     HAS_WINMM = True
 except Exception:
@@ -555,6 +563,38 @@ class ScreenStreamer:
         self._thread.start()
         return True
 
+    def attach_client_socket(self, client: socket.socket, label: str = "직결"):
+        """
+        외부(예: 로컬 TCP accept 또는 OCI 역방향 비디오 터널)에서 연결된 소켓을
+        루프백 브릿지 없이 스트리머에 직접 연결하여 커널 버퍼 지연(Bufferbloat)을 0으로 만듭니다.
+        """
+        try:
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # 프레임 크기가 15~22KB이므로 송신 버퍼를 24KB로 제한해 커널 큐잉 지연을 원천 차단
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 24576)
+            client.settimeout(3.0)
+        except Exception:
+            pass
+
+        prev_client = self._client_sock
+        self._client_sock = client
+        if prev_client and prev_client is not client:
+            try:
+                prev_client.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                prev_client.close()
+            except Exception:
+                pass
+
+        mode_label = self.PROFILES[self.performance_mode]["name"]
+        self.status_callback(
+            f"🟢 게스트 화면 연결됨! ({label}) [{mode_label} {self.max_stream_width}p / {self.target_fps} FPS]"
+        )
+        logger.info(f"게스트 화면 클라이언트 연결 ({label})")
+        threading.Thread(target=self._send_frames, args=(client,), daemon=True).start()
+
     def _stream_loop(self):
         """클라이언트 연결 수락 루프 (새 연결 요청 시 기존 유휴 소켓을 즉시 교체)."""
         mode_label = self.PROFILES[self.performance_mode]["name"]
@@ -566,24 +606,7 @@ class ScreenStreamer:
                 if not self._server_sock:
                     break
                 client, addr = self._server_sock.accept()
-                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                # 프레임 크기가 15~25KB이므로 송신 버퍼를 32KB로 축소해 커널 버퍼 블로팅(지연 누적) 방지
-                client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
-                client.settimeout(3.0)
-
-                prev_client = self._client_sock
-                self._client_sock = client
-                if prev_client:
-                    try:
-                        prev_client.close()
-                    except Exception:
-                        pass
-
-                self.status_callback(
-                    f"🟢 게스트 연결됨! ({addr[0]}) [{mode_label} {self.max_stream_width}p / {self.target_fps} FPS]"
-                )
-                logger.info(f"게스트 화면 클라이언트 연결: {addr}")
-                threading.Thread(target=self._send_frames, args=(client,), daemon=True).start()
+                self.attach_client_socket(client, f"LAN/직결 {addr[0]}")
             except socket.timeout:
                 continue
             except Exception as e:

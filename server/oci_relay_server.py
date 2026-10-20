@@ -162,8 +162,9 @@ class VideoStreamSplicer:
     """
 
     def __init__(self):
-        # 대기 중인 호스트 역방향 소켓 풀 (가장 최근 호스트 터널 우선 매칭)
-        self.host_waiters = asyncio.Queue()
+        # 대기 중인 호스트 역방향 소켓 스택 (LIFO: 가장 최신의 살아있는 호스트 터널 최우선 매칭)
+        self.host_waiters = []
+        self.new_host_event = asyncio.Event()
 
     @staticmethod
     def _tune_low_latency_socket(writer: asyncio.StreamWriter):
@@ -172,10 +173,31 @@ class VideoStreamSplicer:
             try:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                # 버퍼블로트 방지를 위해 커널 송신 버퍼를 128KB로 제한
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
+                # 버퍼블로트(Bufferbloat) 원천 차단을 위해 릴레이 커널 버퍼를 32KB(약 1.5 프레임)로 제한
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
             except Exception:
                 pass
+
+    def _pop_healthy_host_tunnel(self):
+        """가장 최근에 연결된 살아있는 호스트 터널을 LIFO로 꺼내고, 죽은 구형 터널은 정리."""
+        while self.host_waiters:
+            r, w = self.host_waiters.pop()
+            if not w.is_closing() and not r.at_eof():
+                # 남은 대기 터널은 최대 2개까지만 유지하고 오래된 것은 닫음
+                while len(self.host_waiters) > 2:
+                    _, old_w = self.host_waiters.pop(0)
+                    try:
+                        old_w.close()
+                    except Exception:
+                        pass
+                return r, w
+            else:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+        return None, None
 
     async def handle_host_tunnel(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """호스트가 47999 포트로 연결하여 대기."""
@@ -188,7 +210,8 @@ class VideoStreamSplicer:
                 writer.close()
                 return
             logger.info(f"📺 호스트 비디오 터널 대기 등록: {addr}")
-            await self.host_waiters.put((reader, writer))
+            self.host_waiters.append((reader, writer))
+            self.new_host_event.set()
         except Exception:
             try:
                 writer.close()
@@ -196,21 +219,27 @@ class VideoStreamSplicer:
                 pass
 
     async def handle_guest_stream(self, guest_reader: asyncio.StreamReader, guest_writer: asyncio.StreamWriter):
-        """게스트가 47998 포트로 접속하면 대기 중인 호스트 터널과 즉시 직결."""
+        """게스트가 47998 포트로 접속하면 대기 중인 최신 호스트 터널과 즉시 직결 (최대 5초 대기)."""
         self._tune_low_latency_socket(guest_writer)
         guest_addr = guest_writer.get_extra_info("peername")
         logger.info(f"📱 게스트 비디오 스트림 접속: {guest_addr}")
 
-        host_reader, host_writer = None, None
-        # 유효한 호스트 대기 터널 꺼내기
-        while not self.host_waiters.empty():
-            r, w = await self.host_waiters.get()
-            if not w.is_closing():
-                host_reader, host_writer = r, w
-                break
+        host_reader, host_writer = self._pop_healthy_host_tunnel()
+
+        # 게스트가 호스트보다 0.5~2초 먼저 접속한 경우 호스트 터널이 도착할 때까지 최대 5초 대기
+        if not host_writer:
+            deadline = time.monotonic() + 5.0
+            while not host_writer and time.monotonic() < deadline:
+                self.new_host_event.clear()
+                remaining = max(0.1, deadline - time.monotonic())
+                try:
+                    await asyncio.wait_for(self.new_host_event.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                host_reader, host_writer = self._pop_healthy_host_tunnel()
 
         if not host_writer:
-            logger.warning("⚠️ 대기 중인 호스트 비디오 터널이 없습니다.")
+            logger.warning("⚠️ 대기 중인 호스트 비디오 터널이 없습니다 (5초 타임아웃).")
             try:
                 guest_writer.close()
             except Exception:
@@ -218,7 +247,7 @@ class VideoStreamSplicer:
             return
 
         try:
-            # 호스트 터널에 송출 시작 신호("START\n") 전송 -> 호스트가 즉시 로컬 47998 스트림을 파이프함
+            # 호스트 터널에 송출 시작 신호("START\n") 전송 -> 호스트가 즉시 ScreenStreamer에 소켓 직접 연결
             host_writer.write(b"START\n")
             await host_writer.drain()
 

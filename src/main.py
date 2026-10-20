@@ -1296,7 +1296,12 @@ class SpikeLauncher(QMainWindow):
                 except Exception:
                     pass
             best_stream_ip, best_stream_port = self.guest_runner.get_best_stream_endpoint(stream_port)
-            self.viewer_window = GameStreamViewerWindow(best_stream_ip, best_stream_port, guest_runner=self.guest_runner)
+            self.viewer_window = GameStreamViewerWindow(
+                best_stream_ip,
+                best_stream_port,
+                guest_runner=self.guest_runner,
+                host_local_ip=host_local_ip
+            )
             self.viewer_window.show()
             self.chat_display.addItem("[안내] 📺 실시간 게임 화면 창이 열렸습니다! 창에서 키보드 또는 물리 게임패드로 2P 플레이가 가능합니다.")
             self.chat_display.scrollToItem(self.chat_display.item(self.chat_display.count() - 1))

@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
                         }
                         GameViewerScreen(
                             hostIp = currentHostIp,
+                            hostLocalIp = currentHostLocalIp ?: currentHostIp,
                             inputSender = sender,
                             onExitGame = {
                                 activeInputSender = null

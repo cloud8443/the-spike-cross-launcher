@@ -20,6 +20,7 @@ class FramePacket(
 
 class StreamReceiver(
     private val hostIp: String,
+    private val hostLocalIp: String = hostIp,
     private val port: Int = 47998,
     private val onFrameDecoded: (Bitmap) -> Unit
 ) {
@@ -64,7 +65,7 @@ class StreamReceiver(
 
                 val decodeOptions = BitmapFactory.Options().apply {
                     inMutable = true
-                    inPreferredConfig = Bitmap.Config.RGB_565
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
                     inSampleSize = 1
                     inTempStorage = tempStorage
                 }
@@ -87,7 +88,7 @@ class StreamReceiver(
                             decodeOptions
                         )
                     } catch (e: IllegalArgumentException) {
-                        // 해상도 변경(예: 720p -> 480p) 시 비트맵 풀 즉시 재할당
+                        // 해상도 변경(예: 720p -> 900p) 시 비트맵 풀 즉시 재할당
                         decodeOptions.inBitmap = null
                         decoded = BitmapFactory.decodeByteArray(
                             incoming.data,
@@ -99,12 +100,12 @@ class StreamReceiver(
                             bitmapBufferA = Bitmap.createBitmap(
                                 decoded.width,
                                 decoded.height,
-                                Bitmap.Config.RGB_565
+                                Bitmap.Config.ARGB_8888
                             )
                             bitmapBufferB = Bitmap.createBitmap(
                                 decoded.width,
                                 decoded.height,
-                                Bitmap.Config.RGB_565
+                                Bitmap.Config.ARGB_8888
                             )
                         }
                     } catch (_: Exception) {
@@ -123,7 +124,7 @@ class StreamReceiver(
                             bitmapBufferB = Bitmap.createBitmap(
                                 decoded.width,
                                 decoded.height,
-                                Bitmap.Config.RGB_565
+                                Bitmap.Config.ARGB_8888
                             )
                         }
 
@@ -145,33 +146,53 @@ class StreamReceiver(
                 }
             }
 
-            // 2. 고속 네트워크 소켓 수신 루프
+            // 2. 고속 네트워크 소켓 수신 루프 (1순위: 같은 Wi-Fi LAN 350ms 직결 -> 실패 시 0ms 지연으로 OCI 고속 릴레이 즉시 전환)
             var writePacket = FramePacket(ByteArray(256 * 1024))
 
             while (isActive) {
                 attempt++
                 var socket: Socket? = null
                 try {
-                    val targetConnectIp = if (attempt % 2 == 1 && hostIp.isNotBlank() && hostIp != "127.0.0.1" && hostIp != "146.56.101.107") {
-                        hostIp
-                    } else {
-                        "146.56.101.107"
+                    val candidates = mutableListOf<Pair<String, Int>>()
+                    for (ip in listOf(hostLocalIp, hostIp)) {
+                        if (ip.isNotBlank() && ip != "127.0.0.1" && ip != "146.56.101.107" && candidates.none { it.first == ip }) {
+                            candidates.add(ip to 350)
+                        }
                     }
-                    val isRelay = targetConnectIp == "146.56.101.107"
-                    _statusMessage.value = if (isRelay) {
-                        "OCI 고속 릴레이($targetConnectIp:$port) 스트림 연결 중..."
-                    } else {
-                        "호스트($targetConnectIp:$port) 직결 스트림 연결 시도 중... (#$attempt)"
+                    candidates.add("146.56.101.107" to 4000)
+
+                    var connectedIp = ""
+                    var lastErr: Exception? = null
+                    for ((candidateIp, timeoutMs) in candidates) {
+                        if (!isActive) break
+                        val isRelayCandidate = candidateIp == "146.56.101.107"
+                        _statusMessage.value = if (isRelayCandidate) {
+                            "OCI 고속 릴레이($candidateIp:$port) 스트림 연결 중..."
+                        } else {
+                            "같은 Wi-Fi 직결($candidateIp:$port) 확인 중..."
+                        }
+                        val s = Socket()
+                        try {
+                            s.tcpNoDelay = true
+                            s.soTimeout = 4000
+                            s.receiveBufferSize = 64 * 1024
+                            s.connect(InetSocketAddress(candidateIp, port), timeoutMs)
+                            socket = s
+                            connectedIp = candidateIp
+                            break
+                        } catch (e: Exception) {
+                            lastErr = e
+                            try { s.close() } catch (_: Exception) {}
+                        }
                     }
 
-                    socket = Socket()
-                    socket.tcpNoDelay = true
-                    socket.soTimeout = 4000
-                    socket.receiveBufferSize = 64 * 1024 // 480p 초경량 프레임에 맞춘 저지연 수신 버퍼
-                    socket.connect(InetSocketAddress(targetConnectIp, port), if (isRelay) 4000 else 2000)
+                    if (socket == null) {
+                        throw lastErr ?: ConnectException("스트림 서버 연결 실패")
+                    }
 
+                    val isRelay = connectedIp == "146.56.101.107"
                     val input = DataInputStream(socket.getInputStream())
-                    _statusMessage.value = "연결 성공! (${if (isRelay) "OCI 릴레이" else "P2P 직결"}) 비디오 수신 중..."
+                    _statusMessage.value = "연결 성공! (${if (isRelay) "OCI 릴레이" else "LAN 직결"}) HD 비디오 수신 중..."
 
                     while (isActive) {
                         var frameSize = input.readInt()
@@ -180,15 +201,13 @@ class StreamReceiver(
                         }
 
                         // [초저지연 패스트포워드: 지연 누적 원천 차단]
-                        // Wi-Fi 네트워크 지터로 인해 소켓 버퍼에 이미 후속 프레임이 대기 중인 경우,
-                        // 낡은 프레임을 즉시 폐기하고 최신 프레임으로 직행하여 누적 딜레이를 0ms로 유지!
+                        // 소켓 버퍼에 이미 후속 프레임이 대기 중인 경우 readFully로 정확히 건너뛰어
+                        // TCP 스트림 정렬 깨짐 없이 가장 최신 프레임으로 즉시 직행!
                         while (input.available() >= frameSize + 4) {
-                            var skipped = 0
-                            while (skipped < frameSize) {
-                                val n = input.skipBytes(frameSize - skipped)
-                                if (n <= 0) break
-                                skipped += n
+                            if (writePacket.data.size < frameSize) {
+                                writePacket.data = ByteArray((frameSize * 1.3).toInt())
                             }
+                            input.readFully(writePacket.data, 0, frameSize)
                             frameSize = input.readInt()
                             if (frameSize <= 0 || frameSize > 5 * 1024 * 1024) {
                                 break

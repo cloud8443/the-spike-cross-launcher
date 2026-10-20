@@ -166,9 +166,10 @@ class StreamReceiverThread(QObject):
     fps_updated = pyqtSignal(int)
     disconnected = pyqtSignal(str)
 
-    def __init__(self, host_ip, stream_port=47998):
+    def __init__(self, host_ip, stream_port=47998, host_local_ip=None):
         super().__init__()
         self.host_ip = host_ip
+        self.host_local_ip = host_local_ip or host_ip
         self.stream_port = stream_port
         self._running = False
         self._sock = None
@@ -187,24 +188,49 @@ class StreamReceiverThread(QObject):
         t = threading.Thread(target=self._recv_loop, daemon=True)
         t.start()
 
+    def _connect_best_socket(self) -> socket.socket:
+        """1순위: 호스트 LAN IP(0.35초 고속 탐색), 2순위: OCI 고속 릴레이(146.56.101.107) 즉시 연결."""
+        candidates = []
+        for ip in (self.host_local_ip, self.host_ip):
+            if ip and ip not in ("", "127.0.0.1", "146.56.101.107") and ip not in [c[0] for c in candidates]:
+                candidates.append((ip, 0.35))
+        candidates.append(("146.56.101.107", 4.0))
+
+        last_err = None
+        for target_ip, timeout_sec in candidates:
+            if not self._running:
+                break
+            sock = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+                sock.settimeout(timeout_sec)
+                sock.connect((target_ip, self.stream_port))
+                sock.settimeout(4.0)
+                logger.info(f"호스트 화면 스트림 연결 성공: {target_ip}:{self.stream_port}")
+                return sock
+            except Exception as e:
+                last_err = e
+                if sock:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+        raise ConnectionError(f"스트림 서버 연결 실패 ({last_err})")
+
     def _recv_loop(self):
         retry_count = 0
         while self._running:
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)  # 저지연 버퍼 최적화
-                sock.settimeout(4.0)
-                sock.connect((self.host_ip, self.stream_port))
-                self._sock = sock
-                logger.info(f"호스트 화면 스트림 연결 성공: {self.host_ip}:{self.stream_port}")
+                self._sock = self._connect_best_socket()
                 break
             except Exception as e:
                 retry_count += 1
-                if retry_count > 10 or not self._running:
+                if retry_count > 12 or not self._running:
                     self.disconnected.emit(f"호스트 화면 연결 실패: {e}")
                     return
-                time.sleep(1.0)
+                time.sleep(0.6)
 
         fps_timer = time.perf_counter()
         frames_count = 0
@@ -233,17 +259,25 @@ class StreamReceiverThread(QObject):
                 # 소켓 버퍼에 후속 프레임 데이터가 이미 들어와 있는 경우,
                 # 낡은 프레임을 디코딩하지 않고 폐기한 뒤 가장 최신의 프레임으로 직행합니다.
                 if ws2_32 is not None:
+                    ff_error = False
                     while self._running:
                         ws2_32.ioctlsocket(self._sock.fileno(), FIONREAD, ctypes.byref(avail))
                         if avail.value >= payload_len + 4:
+                            if len(payload_buf) < payload_len:
+                                payload_buf = bytearray(payload_len)
                             if not self._recv_into_exact(payload_buf, payload_len):
+                                ff_error = True
                                 break
                             if not self._recv_into_exact(header_buf, 4):
+                                ff_error = True
                                 break
                             payload_len = struct.unpack(">I", header_buf)[0]
                             if payload_len <= 0 or payload_len > MAX_FRAME_SIZE:
+                                ff_error = True
                                 break
                             continue
+                        break
+                    if ff_error:
                         break
 
                 if len(payload_buf) < payload_len:
@@ -356,9 +390,10 @@ class VideoDisplayWidget(QWidget):
 class GameStreamViewerWindow(QWidget):
     """게스트 전용 원격 플레이 뷰어 창 (최대 120 FPS 지원)."""
 
-    def __init__(self, host_ip, stream_port, guest_runner=None, parent=None):
+    def __init__(self, host_ip, stream_port, guest_runner=None, parent=None, host_local_ip=None):
         super().__init__(parent)
         self.host_ip = host_ip
+        self.host_local_ip = host_local_ip or (guest_runner.host_local_ip if guest_runner else host_ip)
         self.stream_port = stream_port
         self.guest_runner = guest_runner
         self._receiver = None
@@ -490,7 +525,7 @@ class GameStreamViewerWindow(QWidget):
         self.setFocus()
 
     def _start_stream(self):
-        self._receiver = StreamReceiverThread(self.host_ip, self.stream_port)
+        self._receiver = StreamReceiverThread(self.host_ip, self.stream_port, host_local_ip=self.host_local_ip)
         self._receiver.frame_ready.connect(self._on_frame_ready)
         self._receiver.fps_updated.connect(lambda fps: self.lbl_fps.setText(f"FPS: {fps} | 딜레이: 초저지연 (<8ms)"))
         self._receiver.disconnected.connect(self._on_disconnected)
